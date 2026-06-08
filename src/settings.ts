@@ -14,10 +14,12 @@
 import { PluginSettingTab, type App, Setting, Modal, Notice } from "obsidian";
 import {
         type TrackInfo,
+        type CollectionConfig,
         SETTINGS_VERSION,
         DEFAULT_SETTINGS,
         DEFAULT_TRACKS,
         DEFAULT_STATUSES,
+        DEFAULT_COLLECTIONS,
         normalizePathSetting,
         TEMPLATE_VARIABLES,
 } from "./types";
@@ -96,55 +98,67 @@ export class IsHistorySettingTab extends PluginSettingTab {
                 containerEl.empty();
 
                 // ═══════════════════════════════════════════════════════════
-                //  CONTENT PATHS
+                //  v1.9.0: COLLECTIONS
                 // ═══════════════════════════════════════════════════════════
-                containerEl.createEl("h2", { text: "Content Paths" });
+                containerEl.createEl("h2", { text: "Collections" });
                 containerEl.createEl("p", {
-                        text: "Where your blog posts and research notes live inside the vault. These should match your Astro project's content folder structure.",
+                        text: "Collections define where your content lives and how it is validated. Each collection has its own path, SEO mode, and required fields. You can have as many collections as you need.",
                         cls: "cms-settings-hint",
                 });
 
-                new Setting(containerEl)
-                        .setName("Archive path")
-                        .setDesc("Folder with your blog posts (e.g. src/content/blog)")
-                        .addText((text) =>
-                                text
-                                        .setPlaceholder("src/content/blog")
-                                        .setValue(this.plugin.settings.archivePath)
-                                        .onChange(async (v) => {
-                                                this.plugin.settings.archivePath = normalizePathSetting(v);
-                                                await this.plugin.saveSettings();
-                                                this._debouncedRescan();
+                for (const col of this.plugin.settings.collections) {
+                        new Setting(containerEl)
+                                .setName(`${col.emoji} ${col.name}`)
+                                .setDesc(`ID: ${col.id} \u00B7 Path: ${col.path} \u00B7 SEO: ${col.seoMode}`)
+                                .addButton((btn) =>
+                                        btn.setButtonText("Edit").onClick(() => {
+                                                new CollectionEditorModal(this.app, this.plugin, col.id, col, () => this.display()).open();
                                         })
-                        )
-                        .addExtraButton((btn) =>
-                                btn.setIcon("reset").setTooltip("Reset to default").onClick(async () => {
-                                        this.plugin.settings.archivePath = DEFAULT_SETTINGS.archivePath;
-                                        await this.plugin.saveSettings();
-                                        this._debouncedRescan();
-                                        this.display();
+                                )
+                                .addButton((btn) =>
+                                        btn.setButtonText("Remove").setWarning().onClick(async () => {
+                                                if (this.plugin.settings.collections.length <= 1) {
+                                                        new Notice("You must have at least one collection.");
+                                                        return;
+                                                }
+                                                const colItems = [...this.plugin.cache.items.values()].filter((i) => i.collection === col.id).length;
+                                                if (colItems > 0) {
+                                                        new Notice(`Cannot remove "${col.name}" — ${colItems} item(s) are in this collection. Move them first.`);
+                                                        return;
+                                                }
+                                                this.plugin.settings.collections = this.plugin.settings.collections.filter((c) => c.id !== col.id);
+                                                await this.plugin.saveSettings();
+                                                this.plugin._updateDynamicStyles();
+                                                this._debouncedRescan();
+                                                this.display();
+                                                new Notice(`Collection "${col.name}" removed.`);
+                                        })
+                                );
+                }
+
+                new Setting(containerEl)
+                        .setName("Add a new collection")
+                        .setDesc("Create a new content collection with its own path, SEO mode, and validation rules")
+                        .addButton((btn) =>
+                                btn.setButtonText("+ Add Collection").setCta().onClick(() => {
+                                        new CollectionEditorModal(this.app, this.plugin, null, null, () => this.display()).open();
                                 })
                         );
 
+                // Reset collections
                 new Setting(containerEl)
-                        .setName("Vault path")
-                        .setDesc("Folder with your research notes (e.g. src/content/vault)")
-                        .addText((text) =>
-                                text
-                                        .setPlaceholder("src/content/vault")
-                                        .setValue(this.plugin.settings.vaultPath)
-                                        .onChange(async (v) => {
-                                                this.plugin.settings.vaultPath = normalizePathSetting(v);
-                                                await this.plugin.saveSettings();
-                                                this._debouncedRescan();
-                                        })
-                        )
-                        .addExtraButton((btn) =>
-                                btn.setIcon("reset").setTooltip("Reset to default").onClick(async () => {
+                        .setName("Reset collections to default")
+                        .setDesc(`Restore the default collections: ${DEFAULT_COLLECTIONS.map((c) => `${c.emoji} ${c.name}`).join(", ")}`)
+                        .addButton((btn) =>
+                                btn.setButtonText("Reset").setWarning().onClick(async () => {
+                                        this.plugin.settings.collections = DEFAULT_COLLECTIONS.map((c) => ({ ...c }));
+                                        this.plugin.settings.archivePath = DEFAULT_SETTINGS.archivePath;
                                         this.plugin.settings.vaultPath = DEFAULT_SETTINGS.vaultPath;
                                         await this.plugin.saveSettings();
+                                        this.plugin._updateDynamicStyles();
                                         this._debouncedRescan();
                                         this.display();
+                                        new Notice("Collections reset to defaults.");
                                 })
                         );
 
@@ -291,6 +305,17 @@ export class IsHistorySettingTab extends PluginSettingTab {
                 if (Object.keys(s.tracks).length === 0) validationWarnings.push("You have no tracks defined. New posts cannot be created.");
                 if (s.statuses.length === 0) validationWarnings.push("You have no statuses defined. Pre-flight may not work correctly.");
                 if (s.archivePath === s.vaultPath && s.archivePath !== "") validationWarnings.push("Archive path and vault path should be different.");
+                // v1.9.0: Collection path overlap detection
+                for (let i = 0; i < s.collections.length; i++) {
+                        for (let j = i + 1; j < s.collections.length; j++) {
+                                const a = normalizePathSetting(s.collections[i].path);
+                                const b = normalizePathSetting(s.collections[j].path);
+                                if (a && b && (a.startsWith(b + "/") || b.startsWith(a + "/") || a === b)) {
+                                        validationWarnings.push(`Collection paths overlap: "${s.collections[i].name}" (${a}) and "${s.collections[j].name}" (${b}).`);
+                                }
+                        }
+                }
+                if (s.collections.length === 0) validationWarnings.push("You have no collections defined. The plugin will not scan any content.");
                 if (validationWarnings.length > 0) {
                         const warnBox = containerEl.createEl("div", { cls: "cms-settings-warnings" });
                         warnBox.createEl("strong", { text: "Settings issues:" });
@@ -815,6 +840,19 @@ export class IsHistorySettingTab extends PluginSettingTab {
                                 onChange: (v) => { this.plugin.settings.seoMinTags = v; },
                         });
 
+                        // v1.9.0: Low SEO score threshold
+                        this._addNumberInput(containerEl, {
+                                name: "Low SEO score threshold",
+                                desc: "Items scoring below this are flagged as low SEO in filters and reports.",
+                                value: this.plugin.settings.seoLowScoreThreshold,
+                                unit: "points",
+                                min: 0,
+                                max: 100,
+                                step: 5,
+                                defaultValue: DEFAULT_SETTINGS.seoLowScoreThreshold,
+                                onChange: (v) => { this.plugin.settings.seoLowScoreThreshold = v; },
+                        });
+
                         new Setting(containerEl)
                                 .setName("Reset SEO settings to default")
                                 .addButton((btn) =>
@@ -825,6 +863,7 @@ export class IsHistorySettingTab extends PluginSettingTab {
                                                 this.plugin.settings.seoDescOptimalMax = DEFAULT_SETTINGS.seoDescOptimalMax;
                                                 this.plugin.settings.seoMinWordCount = DEFAULT_SETTINGS.seoMinWordCount;
                                                 this.plugin.settings.seoMinTags = DEFAULT_SETTINGS.seoMinTags;
+                                                this.plugin.settings.seoLowScoreThreshold = DEFAULT_SETTINGS.seoLowScoreThreshold;
                                                 await this.plugin.saveSettings();
                                                 this._debouncedRescan();
                                                 this.display();
@@ -863,6 +902,19 @@ export class IsHistorySettingTab extends PluginSettingTab {
                         step: 7,
                         defaultValue: DEFAULT_SETTINGS.staleThresholdDays,
                         onChange: (v) => { this.plugin.settings.staleThresholdDays = v; },
+                });
+
+                // v1.9.0: Recent threshold hours
+                this._addNumberInput(containerEl, {
+                        name: "Recent threshold",
+                        desc: "Content modified within this many hours is considered \"recently modified\" in filters.",
+                        value: this.plugin.settings.recentThresholdHours,
+                        unit: "hours",
+                        min: 1,
+                        max: 168,
+                        step: 1,
+                        defaultValue: DEFAULT_SETTINGS.recentThresholdHours,
+                        onChange: (v) => { this.plugin.settings.recentThresholdHours = v; },
                 });
 
                 new Setting(containerEl)

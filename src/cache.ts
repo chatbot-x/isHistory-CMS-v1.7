@@ -2,8 +2,8 @@
  * isHistory CMS Plugin — Content Cache
  *
  * Dual-collection, incremental content index.
- * v1.5.0: Fully dynamic tracks, statuses, and regex patterns
- * derived from settings rather than hardcoded constants.
+ * v1.9.0: Dynamic collections system — uses findCollectionByPath() for
+ * longest-path-first matching, collection-aware SEO scoring and stats.
  */
 
 import { type App, type TFile } from "obsidian";
@@ -17,32 +17,28 @@ import {
   type ValidationConfig,
   type ArchiveFrontmatter,
   type VaultFrontmatter,
+  type CollectionConfig,
   normalizePathSetting,
   getValidationConfig,
   buildSeriesOrderRegex,
-  RECENT_THRESHOLD_MS,
+  findCollectionByPath,
+  getRecentThresholdMs,
   DEFAULT_STALE_THRESHOLD_MS,
   type SortMode,
 } from "./types";
-import { validateArchive, validateVault, getStatus } from "./validator";
-import { calculateArchiveSEO, calculateVaultSEO, type SEOConfig, type SEOScoreResult } from "./seo";
+import { validateArchive, validateVault, validateForCollection, getStatus } from "./validator";
+import { calculateArchiveSEO, calculateVaultSEO, calculateCollectionSEO, type SEOConfig, type SEOScoreResult, SEO_GRADE_COLORS, SEO_GRADE_THRESHOLDS } from "./seo";
 
 export class ContentCache {
   items: Map<string, ContentItem> = new Map();
   private _stats: CacheStats | null = null;
   private _statsDirty = true;
 
-  // ─── Collection Detection ───
+  // ─── Collection Detection (v1.9.0: longest-path-first matching) ───
 
   _getCollection(path: string, settings: IsHistorySettings): CollectionType | null {
-    const normalizedArchive = normalizePathSetting(settings.archivePath);
-    const normalizedVault = normalizePathSetting(settings.vaultPath);
-    // Boundary-aware: must match exact path or path + separator to avoid
-    // "src/content/blog-vault" matching archivePath "src/content/blog"
-    // Also skip empty paths to avoid matching every file in the vault
-    if (normalizedArchive && (path === normalizedArchive || path.startsWith(normalizedArchive + "/"))) return "archive";
-    if (normalizedVault && (path === normalizedVault || path.startsWith(normalizedVault + "/"))) return "vault";
-    return null;
+    const col = findCollectionByPath(settings, path);
+    return col ? col.id : null;
   }
 
   // ─── Build Item from File ───
@@ -55,10 +51,13 @@ export class ContentCache {
       const cache = app.metadataCache.getFileCache(file);
       const fm = cache?.frontmatter || {};
       const valConfig = config || getValidationConfig(settings);
+      const collectionConfig = findCollectionByPath(settings, file.path);
 
-      // Validate using the correct schema
+      // Validate using collection-aware validation
       let validation: ValidationResult;
-      if (collection === "archive") {
+      if (collectionConfig) {
+        validation = getStatus(validateForCollection(fm, valConfig, collectionConfig));
+      } else if (collection === "archive") {
         validation = getStatus(validateArchive(fm as ArchiveFrontmatter | null, valConfig));
       } else {
         validation = getStatus(validateVault(fm as VaultFrontmatter | null, valConfig));
@@ -84,22 +83,44 @@ export class ContentCache {
           ? [fm.aliases]
           : [];
 
-      // v1.7.0 → v1.8.0: Calculate SEO score with checks breakdown
+      // v1.7.0 → v1.9.0: Calculate SEO score with collection-aware scoring
       let seoScore: number | null = null;
       let seoChecks: import("./seo").SEOCheck[] = [];
-      if (settings.showSeoScore) {
+      if (settings.showSeoScore && collectionConfig) {
         try {
-          // v1.8.0: Read body content for accurate word count scoring
-          // Synchronous read from metadataCache; falls back to "" for safety
           let bodyContent = "";
           try {
-            const rawContent = (app.vault as any).read?.(file);
-            // read() is async but CachedMetadata has body start offset; use cache text if available
-            if (cache && (cache as any).sections) {
-              const bodyStart = (cache as any).frontmatterPosition?.end ?? 0;
-              const fullText = (app as any).metadataCache?.fileCache?.[file.path]?.hash ?? null;
-            }
-            // Fallback: read body from the cached raw content
+            bodyContent = _readBodyFromCache(app, file, cache);
+          } catch { /* body reading is best-effort */ }
+          const seoConfig: SEOConfig = {
+            titleOptimalMin: settings.seoTitleOptimalMin,
+            titleOptimalMax: settings.seoTitleOptimalMax,
+            descOptimalMin: settings.seoDescOptimalMin,
+            descOptimalMax: settings.seoDescOptimalMax,
+            minWordCount: settings.seoMinWordCount,
+            minTags: settings.seoMinTags,
+            imageRequired: collectionConfig.imageRequired,
+            internalLinksRequired: true,
+            seoMode: collectionConfig.seoMode,
+          };
+
+          const seoResult = calculateCollectionSEO(fm, bodyContent, valConfig, seoConfig);
+          if (seoResult === null) {
+            seoScore = null;
+            seoChecks = [];
+          } else {
+            seoScore = seoResult.score;
+            seoChecks = seoResult.checks;
+          }
+        } catch {
+          seoScore = null;
+          seoChecks = [];
+        }
+      } else if (settings.showSeoScore && !collectionConfig) {
+        // Legacy fallback for items without a collection config
+        try {
+          let bodyContent = "";
+          try {
             bodyContent = _readBodyFromCache(app, file, cache);
           } catch { /* body reading is best-effort */ }
           const seoConfig: SEOConfig = {
@@ -168,16 +189,6 @@ export class ContentCache {
     try {
       const config = getValidationConfig(settings);
       const seriesRegex = buildSeriesOrderRegex(settings.tracks);
-      const seoConfig: SEOConfig = {
-        titleOptimalMin: settings.seoTitleOptimalMin,
-        titleOptimalMax: settings.seoTitleOptimalMax,
-        descOptimalMin: settings.seoDescOptimalMin,
-        descOptimalMax: settings.seoDescOptimalMax,
-        minWordCount: settings.seoMinWordCount,
-        minTags: settings.seoMinTags,
-        imageRequired: true,
-        internalLinksRequired: true,
-      };
 
       for (const [path, item] of this.items) {
         if (!settings.showSeoScore || item.seoScore === null) continue;
@@ -186,13 +197,50 @@ export class ContentCache {
           const bodyContent = raw.replace(/^---[\s\S]*?---\n*/, "");
           const cache = app.metadataCache.getFileCache(item.file);
           const fm = cache?.frontmatter || {};
-          const collection = item.collection;
+          const collectionConfig = findCollectionByPath(settings, item.path);
 
-          let seoResult: SEOScoreResult;
-          if (collection === "archive") {
-            seoResult = calculateArchiveSEO(fm as ArchiveFrontmatter | null, bodyContent, config, seoConfig);
+          let seoResult: SEOScoreResult | null;
+
+          if (collectionConfig) {
+            const seoConfig: SEOConfig = {
+              titleOptimalMin: settings.seoTitleOptimalMin,
+              titleOptimalMax: settings.seoTitleOptimalMax,
+              descOptimalMin: settings.seoDescOptimalMin,
+              descOptimalMax: settings.seoDescOptimalMax,
+              minWordCount: settings.seoMinWordCount,
+              minTags: settings.seoMinTags,
+              imageRequired: collectionConfig.imageRequired,
+              internalLinksRequired: true,
+              seoMode: collectionConfig.seoMode,
+            };
+            seoResult = calculateCollectionSEO(fm, bodyContent, config, seoConfig);
           } else {
-            seoResult = calculateVaultSEO(fm as VaultFrontmatter | null, bodyContent);
+            // Legacy fallback
+            const seoConfig: SEOConfig = {
+              titleOptimalMin: settings.seoTitleOptimalMin,
+              titleOptimalMax: settings.seoTitleOptimalMax,
+              descOptimalMin: settings.seoDescOptimalMin,
+              descOptimalMax: settings.seoDescOptimalMax,
+              minWordCount: settings.seoMinWordCount,
+              minTags: settings.seoMinTags,
+              imageRequired: true,
+              internalLinksRequired: true,
+            };
+            if (item.collection === "archive") {
+              seoResult = calculateArchiveSEO(fm as ArchiveFrontmatter | null, bodyContent, config, seoConfig);
+            } else {
+              seoResult = calculateVaultSEO(fm as VaultFrontmatter | null, bodyContent);
+            }
+          }
+
+          if (seoResult === null) {
+            // seoMode is "none"
+            if (item.seoScore !== null) {
+              item.seoScore = null;
+              item.seoChecks = [];
+              this._statsDirty = true;
+            }
+            continue;
           }
 
           // Only update if score changed (avoid unnecessary dirty flags)
@@ -270,13 +318,8 @@ export class ContentCache {
   }
 
   isInCollection(path: string, settings: IsHistorySettings): boolean {
-    const normalizedArchive = normalizePathSetting(settings.archivePath);
-    const normalizedVault = normalizePathSetting(settings.vaultPath);
-    // Boundary-aware and skip empty paths
-    return (
-      (!!normalizedArchive && (path === normalizedArchive || path.startsWith(normalizedArchive + "/"))) ||
-      (!!normalizedVault && (path === normalizedVault || path.startsWith(normalizedVault + "/")))
-    );
+    // v1.9.0: Use dynamic collection detection
+    return findCollectionByPath(settings, path) !== undefined;
   }
 
   // ─── Item Fingerprint (for change detection) ───
@@ -295,22 +338,30 @@ export class ContentCache {
     });
   }
 
-  // ─── Statistics (dynamic tracks + v1.7.0 stale/seo) ───
+  // ─── Statistics (v1.9.0: dynamic collections + configurable thresholds) ───
 
   getStats(settings: IsHistorySettings): CacheStats {
     if (!this._statsDirty && this._stats) return this._stats;
 
     try {
       const items = [...this.items.values()];
-      const archive = items.filter((i) => i.collection === "archive");
-      const vault = items.filter((i) => i.collection === "vault");
+
+      // v1.9.0: Per-collection totals
+      const collectionTotals: Record<string, number> = {};
+      for (const col of settings.collections) {
+        collectionTotals[col.id] = items.filter((i) => i.collection === col.id).length;
+      }
+
+      // Legacy compat
+      const archiveTotal = collectionTotals["archive"] ?? items.filter((i) => i.collection === "archive").length;
+      const vaultTotal = collectionTotals["vault"] ?? items.filter((i) => i.collection === "vault").length;
 
       // Dynamic track counts from settings
       const trackCounts: Record<string, number> = {};
       for (const code of Object.keys(settings.tracks)) {
-        trackCounts[code] = archive.filter((i) => i.track === code).length;
+        trackCounts[code] = items.filter((i) => i.collection === "archive" && i.track === code).length;
       }
-      trackCounts["none"] = archive.filter((i) => !i.track).length;
+      trackCounts["none"] = items.filter((i) => i.collection === "archive" && !i.track).length;
 
       // v1.7.0: Stale count
       const staleCount = items.filter((i) => i.isStale).length;
@@ -321,21 +372,28 @@ export class ContentCache {
         ? Math.round(scoredItems.reduce((sum, i) => sum + (i.seoScore || 0), 0) / scoredItems.length)
         : 0;
 
+      // v1.9.0: Dynamic status counts from settings.statuses
+      const statusCounts: Record<string, number> = {};
+      for (const status of settings.statuses) {
+        statusCounts[status] = items.filter((i) => i.status === status).length;
+      }
+
       const stats: CacheStats = {
         total: items.length,
-        archiveTotal: archive.length,
-        vaultTotal: vault.length,
-        drafts: archive.filter((i) => i.draft).length,
-        published: archive.filter((i) => i.status === "published").length,
-        upcoming: archive.filter((i) => i.status === "upcoming").length,
-        planned: archive.filter((i) => i.status === "planned").length,
+        archiveTotal,
+        vaultTotal,
+        collectionTotals,
+        drafts: items.filter((i) => i.draft).length,
+        published: statusCounts["published"] ?? 0,
+        upcoming: statusCounts["upcoming"] ?? 0,
+        planned: statusCounts["planned"] ?? 0,
         ready: items.filter((i) => i.validation.status === "ready").length,
         errors: items.filter((i) => i.validation.status === "error").length,
         warnings: items.filter((i) => i.validation.status === "warning").length,
         trackCounts,
         uniqueTags: [...new Set(items.flatMap((i) => i.tags))],
-        allEras: [...new Set(archive.map((i) => i.era).filter((e): e is string => !!e))],
-        allSeries: [...new Set(archive.map((i) => i.series).filter((s): s is string => !!s))],
+        allEras: [...new Set(items.filter((i) => i.collection === "archive").map((i) => i.era).filter((e): e is string => !!e))],
+        allSeries: [...new Set(items.filter((i) => i.collection === "archive").map((i) => i.series).filter((s): s is string => !!s))],
         stale: staleCount,
         avgSeoScore,
       };
@@ -346,8 +404,8 @@ export class ContentCache {
     } catch (e) {
       console.error("isHistory CMS: getStats failed", e);
       return {
-        total: 0, archiveTotal: 0, vaultTotal: 0, drafts: 0,
-        published: 0, upcoming: 0, planned: 0, ready: 0,
+        total: 0, archiveTotal: 0, vaultTotal: 0, collectionTotals: {},
+        drafts: 0, published: 0, upcoming: 0, planned: 0, ready: 0,
         errors: 0, warnings: 0, trackCounts: {},
         uniqueTags: [], allEras: [], allSeries: [],
         stale: 0, avgSeoScore: 0,
@@ -457,7 +515,13 @@ export class ContentCache {
     return true;
   }
 
-  private _matchesSingleFilter(item: ContentItem, filter: string): boolean {
+  private _matchesSingleFilter(item: ContentItem, filter: string, settings?: IsHistorySettings): boolean {
+    // v1.9.0: Dynamic collection filters — "collection-{id}" pattern
+    if (filter.startsWith("collection-")) {
+      const collectionId = filter.slice("collection-".length);
+      if (item.collection !== collectionId) return false;
+    }
+    // Legacy: "archive" and "vault" filters still work
     if (filter === "archive" && item.collection !== "archive") return false;
     if (filter === "vault" && item.collection !== "vault") return false;
     // Dynamic track filters: "track-A", "track-P", etc.
@@ -469,16 +533,21 @@ export class ContentCache {
     if (filter === "ready" && item.validation.status !== "ready") return false;
     if (filter === "errors" && item.validation.status !== "error") return false;
     if (filter === "warnings" && item.validation.status !== "warning") return false;
-    // Feature 8: Recently modified filter (24h)
+    // Feature 8: Recently modified filter (configurable hours)
     if (filter === "recent") {
       const mtime = item.file.stat?.mtime;
       if (!mtime) return false;
-      return (Date.now() - mtime) < RECENT_THRESHOLD_MS;
+      // Use configurable threshold — fallback to 24h if no settings available
+      const thresholdMs = settings ? getRecentThresholdMs(settings) : 24 * 60 * 60 * 1000;
+      return (Date.now() - mtime) < thresholdMs;
     }
     // v1.7.0: Stale content filter
     if (filter === "stale" && !item.isStale) return false;
-    // v1.7.0: Low SEO score filter (score < 55)
-    if (filter === "lowSeo" && (item.seoScore === null || item.seoScore >= 55)) return false;
+    // v1.9.0: Low SEO score filter (configurable threshold)
+    if (filter === "lowSeo") {
+      const threshold = settings?.seoLowScoreThreshold ?? 55;
+      if (item.seoScore === null || item.seoScore >= threshold) return false;
+    }
     return true;
   }
 
@@ -504,26 +573,17 @@ function _isItemStale(file: TFile, settings: IsHistorySettings): boolean {
 
 /**
  * v1.8.0: Best-effort synchronous body content extraction from Obsidian's internal cache.
- *
- * Obsidian stores raw file content in an internal cache keyed by path. We access
- * it through undocumented (but stable) internals to avoid an async vault.read() call
- * inside the synchronous _buildItem() path. If the internal cache is unavailable,
- * returns "" — the word-count SEO check will simply report as "not yet available."
  */
 function _readBodyFromCache(app: App, file: TFile, metadata: any): string {
   try {
-    // Strategy 1: Obsidian's internal fileCache stores the raw content hash + text
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fileCache = (app as any).metadataCache?.fileCache?.[file.path];
     if (fileCache?.hash) {
-      // Try to get content from the vault's adapter cache
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const adapter = (app.vault as any).adapter;
       if (adapter?.files?.[file.path]?.stat) {
-        // The adapter stores read content in an internal map after first read
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const vaultFiles = (app.vault as any).files;
-        // Try direct internal read cache
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const internalCache = (app as any).vault?.readCache?.[file.path];
         if (typeof internalCache === "string") {
@@ -532,8 +592,7 @@ function _readBodyFromCache(app: App, file: TFile, metadata: any): string {
       }
     }
 
-    // Strategy 2: If Obsidian has already opened this file, the editor has the content
-    // We can try to get it from the active view
+    // Strategy 2: If Obsidian has already opened this file
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const activeView = app.workspace.getActiveViewOfType({} as any);
     if (activeView && (activeView as any).file?.path === file.path) {
@@ -544,7 +603,7 @@ function _readBodyFromCache(app: App, file: TFile, metadata: any): string {
     }
   } catch { /* best-effort */ }
 
-  return ""; // Fallback: word count check will show as needing attention
+  return "";
 }
 
 /** Extract body content from a full markdown string (strip frontmatter) */

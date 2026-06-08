@@ -3,8 +3,7 @@
  *
  * Orchestrates all plugin components: cache, views, commands,
  * settings, and shared operations.
- * v1.6.0: Pre-flight validation gate, status bar health indicator,
- * context menus, deep-merge settings, save failure notices.
+ * v1.9.0: Dynamic collections, collection-aware validation/SEO.
  */
 
 import { Plugin, Notice, Modal, TFile, type Menu } from "obsidian";
@@ -14,6 +13,7 @@ import {
   type TrackTemplate,
   type ValidationResult,
   type TrackInfo,
+  type CollectionConfig,
   DEFAULT_SETTINGS,
   normalizePathSetting,
   substituteVars,
@@ -21,9 +21,11 @@ import {
   hexToRgba,
   deepMerge,
   buildSeriesOrderRegex,
+  findCollectionByPath,
+  getCollectionConfig,
 } from "./types";
 import { ContentCache } from "./cache";
-import { validateArchive, validateVault, getStatus } from "./validator";
+import { validateArchive, validateVault, validateForCollection, getStatus } from "./validator";
 import { IsHistorySettingTab, migrateSettings } from "./settings";
 import {
   IsHistoryDashboardView,
@@ -34,6 +36,7 @@ import {
   VIEW_TYPE_SIDEBAR,
 } from "./sidebar";
 import { generateHealthReport, renderReportMarkdown } from "./report";
+import { getSEOLabel } from "./seo";
 
 export default class IsHistoryPlugin extends Plugin {
   settings!: IsHistorySettings;
@@ -178,7 +181,6 @@ export default class IsHistoryPlugin extends Plugin {
     this._statusBarItem.classList.add("ishistory-statusbar");
     this._statusBarItem.createEl("span", { cls: "ishistory-statusbar-icon", text: "isH" });
     this._statusBarItem.createEl("span", { cls: "ishistory-statusbar-text", text: " Loading..." });
-    // Use registerDomEvent for proper cleanup on plugin unload
     this.registerDomEvent(this._statusBarItem, "click", () => { void this.activateDashboard(); });
     this._updateStatusBar();
   }
@@ -210,10 +212,8 @@ export default class IsHistoryPlugin extends Plugin {
   // ─── Feature 9: Right-click Context Menus ───
 
   private _registerContextMenus(): void {
-    // File explorer context menu
     this.registerEvent(
       this.app.workspace.on("file-menu" as never, (menu: Menu, file) => {
-        // file is TAbstractFile — check if it has a path ending in .md
         const abstractFile = file as unknown as { path?: string };
         if (typeof abstractFile.path !== "string" || !abstractFile.path.endsWith(".md")) return;
         if (!this.cache.isInCollection(abstractFile.path, this.settings)) return;
@@ -243,7 +243,6 @@ export default class IsHistoryPlugin extends Plugin {
       })
     );
 
-    // Editor context menu
     this.registerEvent(
       this.app.workspace.on("editor-menu" as never, (menu: Menu) => {
         const file = this.app.workspace.getActiveFile();
@@ -267,13 +266,11 @@ export default class IsHistoryPlugin extends Plugin {
   private _trackCommandIds: string[] = [];
 
   private _registerTrackCommands(): void {
-    // Remove old track commands first to avoid duplicates when tracks change
     for (const id of this._trackCommandIds) {
       try {
-        // Obsidian internal: app.commands is not typed but exists at runtime
         const cmds = (this.app as unknown as { commands?: { removeCommand?: (id: string) => void } }).commands;
         cmds?.removeCommand?.(`ishistory-cms:${id}`);
-      } catch { /* ignore — command may not exist */ }
+      } catch { /* ignore */ }
     }
     this._trackCommandIds = [];
 
@@ -318,6 +315,13 @@ export default class IsHistoryPlugin extends Plugin {
       rules.push(`.cms-stat-track-${lc} .cms-stat-value { color: ${info.color}; }`);
     }
 
+    // v1.9.0: Dynamic collection CSS
+    for (const col of this.settings.collections) {
+      const colId = col.id.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      rules.push(`.cms-stat-collection-${colId} .cms-stat-value { color: ${col.color}; }`);
+      rules.push(`.cms-card.cms-card-collection-${colId} { border-left-color: ${col.color}; }`);
+    }
+
     const primaryColor = Object.values(this.settings.tracks)[0]?.color || "#7c3aed";
     rules.push(`.cms-card-tag { background: ${hexToRgba(primaryColor, 0.1)}; color: var(--ish-track-a, ${primaryColor}); }`);
     rules.push(`.cms-tag-chip { background: ${hexToRgba(primaryColor, 0.08)}; color: var(--ish-track-a, ${primaryColor}); }`);
@@ -332,14 +336,17 @@ export default class IsHistoryPlugin extends Plugin {
       const loaded = await this.loadData();
       const migrated = migrateSettings(loaded || {});
       // ─── Feature 5: Deep-merge instead of shallow assign ───
-      // Start from defaults, then deep-merge migrated values on top
       this.settings = deepMerge(
         Object.assign({}, DEFAULT_SETTINGS) as unknown as Record<string, unknown>,
         migrated as Record<string, unknown>,
       ) as unknown as IsHistorySettings;
       this.settings._version = DEFAULT_SETTINGS._version;
+      // v1.9.0: Normalize collection paths on load
       this.settings.archivePath = normalizePathSetting(this.settings.archivePath);
       this.settings.vaultPath = normalizePathSetting(this.settings.vaultPath);
+      for (const col of this.settings.collections) {
+        col.path = normalizePathSetting(col.path);
+      }
       if (loaded && (loaded._version || 0) < DEFAULT_SETTINGS._version) {
         await this.saveData(this.settings);
       }
@@ -348,8 +355,6 @@ export default class IsHistoryPlugin extends Plugin {
       this.settings = Object.assign({}, DEFAULT_SETTINGS) as IsHistorySettings;
     }
   }
-
-  // ─── Feature 3: Failed save Notice ───
 
   async saveSettings() {
     try {
@@ -371,7 +376,6 @@ export default class IsHistoryPlugin extends Plugin {
           leaf.view.requestRender();
         }
       }
-      // Update status bar after every rescan
       this._updateStatusBar();
     } catch (e) {
       console.error("isHistory CMS: rescanCache failed", e);
@@ -438,8 +442,14 @@ export default class IsHistoryPlugin extends Plugin {
       const cache = this.app.metadataCache.getFileCache(file);
       const fm = cache?.frontmatter;
       const config = getValidationConfig(this.settings);
-      const collection = this.cache._getCollection(file.path, this.settings);
+      const collectionConfig = findCollectionByPath(this.settings, file.path);
 
+      if (collectionConfig) {
+        return getStatus(validateForCollection(fm || null, config, collectionConfig));
+      }
+
+      // Legacy fallback
+      const collection = this.cache._getCollection(file.path, this.settings);
       if (collection === "archive") {
         return getStatus(validateArchive(fm, config));
       } else if (collection === "vault") {
@@ -459,7 +469,9 @@ export default class IsHistoryPlugin extends Plugin {
     try {
       const file = this.app.workspace.getActiveFile();
       if (!file || !this.cache.isInCollection(file.path, this.settings)) {
-        new Notice("Open an archive or vault file first.");
+        const firstCollection = this.settings.collections[0];
+        const hint = firstCollection ? `Open a file in ${firstCollection.name} first.` : "Open a content file first.";
+        new Notice(hint);
         return;
       }
       const result = this.validateFile(file);
@@ -480,7 +492,6 @@ export default class IsHistoryPlugin extends Plugin {
   async preflightFile(file: TFile, skipConfirm = false): Promise<void> {
     if (!file) return;
     try {
-      // Validate first — warn if errors exist (skip modal when called from bulk operations)
       const result = this.validateFile(file);
       const hasErrors = result.errors.some((e) => e.severity === "error");
       if (hasErrors && !skipConfirm) {
@@ -528,7 +539,9 @@ export default class IsHistoryPlugin extends Plugin {
     try {
       const file = this.app.workspace.getActiveFile();
       if (!file || !this.cache.isInCollection(file.path, this.settings)) {
-        new Notice("Open an archive or vault file first.");
+        const firstCollection = this.settings.collections[0];
+        const hint = firstCollection ? `Open a file in ${firstCollection.name} first.` : "Open a content file first.";
+        new Notice(hint);
         return;
       }
       await this.preflightFile(file);
@@ -537,18 +550,37 @@ export default class IsHistoryPlugin extends Plugin {
     }
   }
 
-  // ─── New Post (template engine) ───
+  // ─── New Post (v1.9.0: collection-aware template engine) ───
 
   /** Escape double quotes for YAML string values */
   private _yamlSafe(s: string): string {
     return s.replace(/"/g, '\\"');
   }
 
-  async newPost(track: TrackCode) {
+  async newPost(track: TrackCode, collectionId?: string) {
     try {
       const info: TrackInfo | undefined = this.settings.tracks[track];
       if (!info) {
         new Notice(`Unknown track: ${track}`);
+        return;
+      }
+
+      // v1.9.0: Find the collection to create in
+      let targetCollection: CollectionConfig;
+      if (collectionId) {
+        const found = getCollectionConfig(this.settings, collectionId);
+        if (!found) {
+          new Notice(`Unknown collection: ${collectionId}`);
+          return;
+        }
+        targetCollection = found;
+      } else {
+        // Default: first collection that allows creating new posts
+        targetCollection = this.settings.collections.find((c) => c.canCreateNew) || this.settings.collections[0];
+      }
+
+      if (!targetCollection) {
+        new Notice("No collection available for creating new posts.");
         return;
       }
 
@@ -557,10 +589,10 @@ export default class IsHistoryPlugin extends Plugin {
 
       const vars: Record<string, string> = {};
 
-      // Use dynamic regex from track codes (supports multi-character codes)
+      // Use dynamic regex from track codes
       const seriesRegex = buildSeriesOrderRegex(this.settings.tracks);
       const existingOrders = this.cache
-        .getSortedItems("archive", this.settings.tracks)
+        .getSortedItems(targetCollection.id, this.settings.tracks)
         .filter((i) => i.track === track && i.seriesOrder)
         .map((i) => {
           const m = i.seriesOrder.match(seriesRegex);
@@ -585,7 +617,7 @@ export default class IsHistoryPlugin extends Plugin {
       const bodyTemplate = trackTpl.body || this.settings.newPostBody;
 
       const slug = substituteVars(slugTemplate, vars);
-      let path = `${normalizePathSetting(this.settings.archivePath)}/${slug}.md`;
+      let path = `${normalizePathSetting(targetCollection.path)}/${slug}.md`;
 
       let suffix = 0;
       while (this.app.vault.getAbstractFileByPath(path)) {
@@ -593,7 +625,7 @@ export default class IsHistoryPlugin extends Plugin {
         vars.seriesOrder = `${seriesOrder}-${suffix}`;
         vars.seriesOrderLower = `${seriesOrder.toLowerCase()}-${suffix}`;
         const collSlug = substituteVars(slugTemplate, vars);
-        path = `${normalizePathSetting(this.settings.archivePath)}/${collSlug}.md`;
+        path = `${normalizePathSetting(targetCollection.path)}/${collSlug}.md`;
       }
 
       vars.seriesOrder = suffix > 0 ? `${seriesOrder}-${suffix}` : seriesOrder;
@@ -604,6 +636,9 @@ export default class IsHistoryPlugin extends Plugin {
       const series = substituteVars(seriesTemplate, vars);
       const status = substituteVars(statusTemplate, vars);
       const body = substituteVars(bodyTemplate, vars);
+
+      // v1.9.0: Use collection's defaultDraft instead of hardcoded true
+      const draftValue = targetCollection.defaultDraft;
 
       // v1.8.0: Build frontmatter with track-specific extra fields
       let extraFmLines = "";
@@ -618,7 +653,7 @@ export default class IsHistoryPlugin extends Plugin {
 title: "${this._yamlSafe(title)}"
 date: ${vars.date}
 description: ""
-draft: true
+draft: ${draftValue}
 tags: []
 image: "${this._yamlSafe(image)}"
 series: "${this._yamlSafe(series)}"
@@ -637,7 +672,7 @@ ${body}`;
       const createdFile = await this.app.vault.create(path, content);
       const leaf = this.app.workspace.getLeaf(false);
       await leaf.openFile(createdFile);
-      new Notice(`Created ${vars.seriesOrder} — fill in the frontmatter!`);
+      new Notice(`Created ${vars.seriesOrder} in ${targetCollection.name} — fill in the frontmatter!`);
     } catch (e) {
       new Notice(`Failed to create: ${(e as Error).message}`);
     }
@@ -662,7 +697,9 @@ ${body}`;
   async bulkPreFlight() {
     try {
       this.cache.scanAll(this.app, this.settings);
-      const drafts = this.cache.getSortedItems("archive", this.settings.tracks).filter((i) => i.draft);
+      // v1.9.0: Get drafts from first canCreateNew collection or all items
+      const targetCollection = this.settings.collections.find((c) => c.canCreateNew) || this.settings.collections[0];
+      const drafts = this.cache.getSortedItems(targetCollection?.id, this.settings.tracks).filter((i) => i.draft);
       if (drafts.length === 0) {
         new Notice("No drafts to pre-flight.");
         return;
@@ -696,7 +733,7 @@ ${body}`;
       let published = 0;
       for (const item of drafts) {
         try {
-          await this.preflightFile(item.file, true); // skipConfirm — already confirmed above
+          await this.preflightFile(item.file, true);
           published++;
         } catch (e) {
           console.error(`Failed to pre-flight ${item.path}:`, e);
@@ -717,14 +754,16 @@ ${body}`;
     try {
       const file = this.app.workspace.getActiveFile();
       if (!file || !this.cache.isInCollection(file.path, this.settings)) {
-        new Notice("Open an archive or vault file first.");
+        const firstCollection = this.settings.collections[0];
+        const hint = firstCollection ? `Open a file in ${firstCollection.name} first.` : "Open a content file first.";
+        new Notice(hint);
         return;
       }
       await this.app.fileManager.processFrontMatter(file, (fm) => {
         fm.draft = !fm.draft;
       });
       const cached = this.cache.items.get(file.path);
-      const isNowDraft = !cached?.draft; // approximate — cache may not be updated yet
+      const isNowDraft = !cached?.draft;
       new Notice(`${file.basename}: draft set to ${!isNowDraft}`);
       this._updateStatusBar();
     } catch (e) {
@@ -736,7 +775,9 @@ ${body}`;
     try {
       const file = this.app.workspace.getActiveFile();
       if (!file || !this.cache.isInCollection(file.path, this.settings)) {
-        new Notice("Open an archive or vault file first.");
+        const firstCollection = this.settings.collections[0];
+        const hint = firstCollection ? `Open a file in ${firstCollection.name} first.` : "Open a content file first.";
+        new Notice(hint);
         return;
       }
       const cached = this.cache.items.get(file.path);
@@ -744,7 +785,8 @@ ${body}`;
         new Notice("SEO score not available. Enable it in Settings.");
         return;
       }
-      const label = cached.seoScore >= 90 ? "Excellent" : cached.seoScore >= 75 ? "Good" : cached.seoScore >= 55 ? "Fair" : cached.seoScore >= 35 ? "Needs Work" : "Poor";
+      // v1.9.0: Use shared getSEOLabel instead of duplicated thresholds
+      const label = getSEOLabel(cached.seoScore);
       new Notice(`${file.basename}: SEO Score ${cached.seoScore}/100 (${label})`);
     } catch (e) {
       new Notice(`Failed to get SEO score: ${(e as Error).message}`);
@@ -753,16 +795,12 @@ ${body}`;
 
   async openPluginSettings() {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const settingTab = (this.app as any).setting?.pluginTabs?.find(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (t: any) => t.plugin?.manifest?.id === "ishistory-cms"
       );
       if (settingTab) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (this.app as any).setting.open();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (this.app as any).setting.openTabById("ishistory-cms");
+        (this.app as any).setting?.open();
+        (this.app as any).setting?.openTabById("ishistory-cms");
       } else {
         new Notice("Open Settings > Community Plugins > isHistory CMS");
       }
@@ -785,12 +823,12 @@ ${body}`;
   async generateHealthReport() {
     try {
       this.cache.scanAll(this.app, this.settings);
-      // v1.8.0: Refresh SEO scores with body content for accurate report
       await this.cache.refreshSEOWithBodies(this.app, this.settings);
 
       const items = [...this.cache.items.values()];
       const stats = this.cache.getStats(this.settings);
-      const report = generateHealthReport(items, stats, this.settings);
+      // v1.9.0: Pass manifest version instead of hardcoded string
+      const report = generateHealthReport(items, stats, this.settings, this.manifest.version);
       const markdown = renderReportMarkdown(report);
 
       const reportPath = this.settings.reportPath || "isHistory-Report.md";
@@ -801,7 +839,6 @@ ${body}`;
         await this.app.vault.create(reportPath, markdown);
       }
 
-      // Open the report file
       const file = this.app.vault.getAbstractFileByPath(reportPath);
       if (file instanceof TFile) {
         await this.app.workspace.getLeaf(false).openFile(file);
@@ -865,22 +902,25 @@ ${body}`;
   async bulkChangeStatus() {
     try {
       this.cache.scanAll(this.app, this.settings);
-      const archiveItems = [...this.cache.items.values()].filter(
-        (i) => i.collection === "archive",
-      );
+      // v1.9.0: Use first canCreateNew collection or all items (not just archive)
+      const targetCollection = this.settings.collections.find((c) => c.canCreateNew) || this.settings.collections[0];
+      const targetItems = targetCollection
+        ? [...this.cache.items.values()].filter((i) => i.collection === targetCollection.id)
+        : [...this.cache.items.values()];
 
-      if (archiveItems.length === 0) {
-        new Notice("No archive items found.");
+      if (targetItems.length === 0) {
+        new Notice("No items found to update.");
         return;
       }
 
       // Show status picker modal
       const newStatus = await new Promise<string | null>((resolve) => {
         const modal = new Modal(this.app);
-        modal.titleEl.setText("Set status for all archive posts");
+        const collectionName = targetCollection?.name || "all";
+        modal.titleEl.setText(`Set status for all ${collectionName} posts`);
         const body = modal.contentEl.createEl("div");
         body.createEl("p", {
-          text: `Choose the new status for ${archiveItems.length} archive post(s).`,
+          text: `Choose the new status for ${targetItems.length} ${collectionName} post(s).`,
         });
         const btnRow = body.createEl("div", { cls: "cms-new-post-tracks" });
         for (const status of this.settings.statuses) {
@@ -895,7 +935,7 @@ ${body}`;
       if (!newStatus) return;
 
       let changed = 0;
-      for (const item of archiveItems) {
+      for (const item of targetItems) {
         try {
           await this.app.fileManager.processFrontMatter(item.file, (fm) => {
             fm.status = newStatus;
@@ -905,7 +945,7 @@ ${body}`;
           console.error(`Failed to update ${item.path}:`, e);
         }
       }
-      new Notice(`Set status to "${newStatus}" for ${changed}/${archiveItems.length} post(s).`);
+      new Notice(`Set status to "${newStatus}" for ${changed}/${targetItems.length} post(s).`);
       this._updateStatusBar();
     } catch (e) {
       new Notice(`Bulk status change failed: ${(e as Error).message}`);

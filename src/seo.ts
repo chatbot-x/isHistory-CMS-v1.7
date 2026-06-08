@@ -4,7 +4,7 @@
  * Calculates a 0-100 SEO score for content items based on
  * frontmatter completeness, title/description optimization,
  * tags, image, internal links, and word count.
- * v1.7.0: Pure-function architecture, fully configurable thresholds.
+ * v1.9.0: Shared grade constants, seoMode parameter for collection-aware scoring.
  */
 
 import type { ArchiveFrontmatter, VaultFrontmatter, ValidationConfig } from "./types";
@@ -34,6 +34,23 @@ export interface SEOCheck {
   hint: string;
 }
 
+// ─── Shared Grade Constants (v1.9.0 — stop duplicating magic numbers) ───
+
+export const SEO_GRADE_THRESHOLDS = {
+  A: 90,
+  B: 75,
+  C: 55,
+  D: 35,
+} as const;
+
+export const SEO_GRADE_COLORS = {
+  A: "#10b981", // green
+  B: "#3b82f6", // blue
+  C: "#f59e0b", // amber
+  D: "#f97316", // orange
+  F: "#ef4444", // red
+} as const;
+
 // ─── SEO Config (extends ValidationConfig) ───
 
 export interface SEOConfig {
@@ -51,6 +68,8 @@ export interface SEOConfig {
   imageRequired: boolean;
   /** Whether connects (internal links) are required */
   internalLinksRequired: boolean;
+  /** v1.9.0: SEO mode for this collection */
+  seoMode?: "full" | "basic" | "none";
 }
 
 export const DEFAULT_SEO_CONFIG: SEOConfig = {
@@ -66,12 +85,49 @@ export const DEFAULT_SEO_CONFIG: SEOConfig = {
 
 // ─── Score Grading ───
 
-function getGrade(score: number): { grade: string; color: string } {
-  if (score >= 90) return { grade: "A", color: "#10b981" }; // green
-  if (score >= 75) return { grade: "B", color: "#3b82f6" }; // blue
-  if (score >= 55) return { grade: "C", color: "#f59e0b" }; // amber
-  if (score >= 35) return { grade: "D", color: "#f97316" }; // orange
-  return { grade: "F", color: "#ef4444" }; // red
+export function getGrade(score: number): { grade: string; color: string } {
+  if (score >= SEO_GRADE_THRESHOLDS.A) return { grade: "A", color: SEO_GRADE_COLORS.A };
+  if (score >= SEO_GRADE_THRESHOLDS.B) return { grade: "B", color: SEO_GRADE_COLORS.B };
+  if (score >= SEO_GRADE_THRESHOLDS.C) return { grade: "C", color: SEO_GRADE_COLORS.C };
+  if (score >= SEO_GRADE_THRESHOLDS.D) return { grade: "D", color: SEO_GRADE_COLORS.D };
+  return { grade: "F", color: SEO_GRADE_COLORS.F };
+}
+
+/** Get a short summary label for a score (uses shared thresholds) */
+export function getSEOLabel(score: number): string {
+  if (score >= SEO_GRADE_THRESHOLDS.A) return "Excellent";
+  if (score >= SEO_GRADE_THRESHOLDS.B) return "Good";
+  if (score >= SEO_GRADE_THRESHOLDS.C) return "Fair";
+  if (score >= SEO_GRADE_THRESHOLDS.D) return "Needs Work";
+  return "Poor";
+}
+
+// ─── v1.9.0: Collection-aware SEO scoring ───
+
+/**
+ * Calculate SEO score for any collection using the seoMode from its config.
+ * - "none": returns null score
+ * - "basic": simplified scoring (vault-style)
+ * - "full": full scoring (archive-style)
+ */
+export function calculateCollectionSEO(
+  fm: ArchiveFrontmatter | VaultFrontmatter | null | undefined,
+  bodyContent: string,
+  config: ValidationConfig,
+  seoConfig: SEOConfig = DEFAULT_SEO_CONFIG,
+): SEOScoreResult | null {
+  const seoMode = seoConfig.seoMode || "full";
+
+  if (seoMode === "none") {
+    return null;
+  }
+
+  if (seoMode === "basic") {
+    return calculateVaultSEO(fm as VaultFrontmatter | null | undefined, bodyContent);
+  }
+
+  // "full" mode
+  return calculateArchiveSEO(fm as ArchiveFrontmatter | null | undefined, bodyContent, config, seoConfig);
 }
 
 // ─── Archive SEO Scoring ───
@@ -327,13 +383,4 @@ function countWords(text: string): number {
   const withoutCjk = bodyOnly.replace(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g, " ");
   const westernWords = withoutCjk.split(/\s+/).filter((w) => w.length > 0).length;
   return cjkChars + westernWords;
-}
-
-/** Get a short summary label for a score */
-export function getSEOLabel(score: number): string {
-  if (score >= 90) return "Excellent";
-  if (score >= 75) return "Good";
-  if (score >= 55) return "Fair";
-  if (score >= 35) return "Needs Work";
-  return "Poor";
 }

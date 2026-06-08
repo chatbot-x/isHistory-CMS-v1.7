@@ -4,8 +4,7 @@
  * Validates frontmatter for archive and vault collections
  * against the content schema. All rules are pure functions
  * with clear inputs and outputs for testability.
- * v1.5.0: Fully parameterized — all thresholds and track/status
- * values come from ValidationConfig, not hardcoded constants.
+ * v1.9.0: Collection-aware validation with per-collection required fields.
  */
 
 import {
@@ -14,6 +13,7 @@ import {
   type ArchiveFrontmatter,
   type VaultFrontmatter,
   type ValidationConfig,
+  type CollectionConfig,
   DEFAULT_VALIDATION_CONFIG,
   buildSeriesOrderRegex,
   buildConnectsRefRegex,
@@ -26,6 +26,104 @@ function normalizeTags(tags: unknown): unknown {
     return [tags];
   }
   return tags;
+}
+
+// ─── v1.9.0: Collection-aware validation ───
+
+/**
+ * Validate frontmatter for a specific collection.
+ * Uses the collection's requiredFields and configuration.
+ */
+export function validateForCollection(
+  fm: Record<string, unknown> | null | undefined,
+  config: ValidationConfig,
+  collectionConfig: CollectionConfig,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+
+  if (!fm) {
+    errors.push({
+      field: "Frontmatter",
+      message: "Missing frontmatter block entirely.",
+      severity: "error",
+    });
+    return errors;
+  }
+
+  // Use collection's seoMode to determine validation strictness
+  if (collectionConfig.seoMode === "none") {
+    // Minimal validation: just check required fields
+    for (const field of collectionConfig.requiredFields) {
+      const value = fm[field];
+      if (value === undefined || value === null || value === "") {
+        errors.push({
+          field,
+          message: `Required field "${field}" is missing or empty.`,
+          severity: "error",
+        });
+      }
+    }
+    return errors;
+  }
+
+  // For "full" or "basic" seoMode, run the appropriate validation
+  if (collectionConfig.id === "archive" || collectionConfig.seoMode === "full") {
+    // Run archive-style validation with collection-specific required fields
+    const archiveErrors = validateArchive(fm as ArchiveFrontmatter | null, config);
+    // Replace the default requiredFields check with collection-specific ones
+    const filteredErrors = archiveErrors.filter(
+      (e) => !(e.field !== "title" && e.field !== "date" && e.field !== "description" && config.requiredArchiveFields.includes(e.field) && e.message.includes("Required field"))
+    );
+    // Add collection-specific required field checks
+    for (const field of collectionConfig.requiredFields) {
+      // Skip fields already validated with rich rules
+      if (field === "title" || field === "date" || field === "description") continue;
+      const value = fm[field];
+      if (value === undefined || value === null || value === "") {
+        // Only add if not already present
+        if (!filteredErrors.some((e) => e.field === field)) {
+          filteredErrors.push({
+            field,
+            message: `Required field "${field}" is missing or empty.`,
+            severity: "error",
+          });
+        }
+      }
+    }
+    return filteredErrors;
+  }
+
+  if (collectionConfig.id === "vault" || collectionConfig.seoMode === "basic") {
+    const vaultErrors = validateVault(fm as VaultFrontmatter | null, config);
+    // Add collection-specific required field checks
+    for (const field of collectionConfig.requiredFields) {
+      if (field === "title") continue; // Already checked by validateVault
+      const value = fm[field];
+      if (value === undefined || value === null || value === "") {
+        if (!vaultErrors.some((e) => e.field === field)) {
+          vaultErrors.push({
+            field,
+            message: `Required field "${field}" is missing or empty.`,
+            severity: "error",
+          });
+        }
+      }
+    }
+    return vaultErrors;
+  }
+
+  // Default: check required fields only
+  for (const field of collectionConfig.requiredFields) {
+    const value = fm[field];
+    if (value === undefined || value === null || value === "") {
+      errors.push({
+        field,
+        message: `Required field "${field}" is missing or empty.`,
+        severity: "error",
+      });
+    }
+  }
+  return errors;
 }
 
 // ─── Archive Validation ───
@@ -156,11 +254,12 @@ export function validateArchive(
     }
   }
 
-  // draft + status conflict
-  if (fm.draft === true && fm.status === "published") {
+  // v1.9.0: draft + status conflict uses first status from settings instead of hardcoded "published"
+  const firstStatus = config.statuses[0] || "published";
+  if (fm.draft === true && fm.status === firstStatus) {
     errors.push({
       field: "draft",
-      message: `Marked as draft but status is "published". Set draft:false or status:"upcoming".`,
+      message: `Marked as draft but status is "${firstStatus}". Set draft:false or status:"${config.statuses[1] || "upcoming"}".`,
       severity: "warning",
     });
   }
@@ -211,7 +310,6 @@ export function validateArchive(
   }
 
   // figures should be non-empty for profiles (or any track that needs it)
-  // Check if the track's name contains "profile" or "Profile" as a hint
   if (fm.track && config.tracks[fm.track]) {
     const trackInfo = config.tracks[fm.track];
     if (trackInfo.name.toLowerCase().includes("profile") && (!fm.figures || fm.figures.trim() === "")) {

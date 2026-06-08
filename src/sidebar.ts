@@ -2,12 +2,13 @@
  * isHistory CMS Plugin — Sidebar View
  *
  * Context-aware validation panel for the currently active file.
- * v1.5.0: Status badges derived from settings.
+ * v1.9.0: Fixed collection detection bug, uses findCollectionByPath(),
+ * collection config for display, shared SEO constants.
  */
 
 import { ItemView, type WorkspaceLeaf, Notice } from "obsidian";
-import { normalizePathSetting } from "./types";
-import { calculateArchiveSEO, calculateVaultSEO, type SEOConfig, getSEOLabel } from "./seo";
+import { findCollectionByPath, type CollectionConfig } from "./types";
+import { calculateArchiveSEO, calculateVaultSEO, calculateCollectionSEO, type SEOConfig, getSEOLabel, SEO_GRADE_COLORS, SEO_GRADE_THRESHOLDS } from "./seo";
 import { getValidationConfig } from "./types";
 import IsHistoryPlugin from "./main";
 
@@ -93,16 +94,19 @@ export class IsHistorySidebarView extends ItemView {
         activeFile.extension !== "md" ||
         !this.plugin.cache.isInCollection(activeFile.path, settings)
       ) {
+        // v1.9.0: Use collection names dynamically
+        const collectionNames = settings.collections.map((c) => c.name).join(" or ");
         container.createEl("div", {
-          text: "Open a file in archive or vault to validate.",
+          text: `Open a file in ${collectionNames || "a content collection"} to validate.`,
           cls: "cms-sidebar-empty-state",
         });
         return;
       }
 
-      const collection = activeFile.path.startsWith(normalizePathSetting(settings.archivePath))
-        ? "archive"
-        : "vault";
+      // v1.9.0: FIX BUG — use findCollectionByPath instead of broken startsWith
+      const collectionConfig = findCollectionByPath(settings, activeFile.path);
+      const collection = collectionConfig ? collectionConfig.id : this.plugin.cache._getCollection(activeFile.path, settings) || "unknown";
+
       const cached = this.plugin.cache.items.get(activeFile.path);
       const result = cached
         ? cached.validation
@@ -111,6 +115,15 @@ export class IsHistorySidebarView extends ItemView {
       container.createEl("div", { text: "isHistory Validate", cls: "cms-sidebar-title" });
 
       const fileInfo = container.createEl("div", { cls: "cms-sidebar-file-info" });
+
+      // v1.9.0: Show collection badge with emoji/name from config
+      if (collectionConfig) {
+        fileInfo.createEl("span", {
+          text: `${collectionConfig.emoji} ${collectionConfig.name}`,
+          cls: "cms-badge cms-badge-collection",
+        });
+      }
+
       if (cached && cached.seriesOrder) {
         fileInfo.createEl("span", {
           text: cached.seriesOrder,
@@ -119,17 +132,22 @@ export class IsHistorySidebarView extends ItemView {
       }
       fileInfo.createEl("span", { text: activeFile.path, cls: "cms-sidebar-file-title" });
 
-      // v1.7.0 → v1.8.0: SEO Score display with check breakdown
+      // v1.7.0 → v1.9.0: SEO Score display with check breakdown, shared constants
       if (settings.showSeoScore && cached && cached.seoScore !== null) {
         const seoResult = cached.seoScore;
-        const seoColor = seoResult >= 90 ? "#10b981" : seoResult >= 75 ? "#3b82f6" : seoResult >= 55 ? "#f59e0b" : seoResult >= 35 ? "#f97316" : "#ef4444";
+        // v1.9.0: Use shared constants for SEO colors
+        const seoColor = seoResult >= SEO_GRADE_THRESHOLDS.A ? SEO_GRADE_COLORS.A
+          : seoResult >= SEO_GRADE_THRESHOLDS.B ? SEO_GRADE_COLORS.B
+          : seoResult >= SEO_GRADE_THRESHOLDS.C ? SEO_GRADE_COLORS.C
+          : seoResult >= SEO_GRADE_THRESHOLDS.D ? SEO_GRADE_COLORS.D
+          : SEO_GRADE_COLORS.F;
         const seoLabel = getSEOLabel(seoResult);
         const seoWrapper = container.createEl("div", { cls: "cms-seo-wrapper" });
         const scoreEl = seoWrapper.createEl("div", { cls: "cms-seo-score" });
         scoreEl.createEl("span", { text: String(seoResult), cls: "cms-seo-number", attr: { style: `color: ${seoColor}` } });
         scoreEl.createEl("span", { text: `/100 ${seoLabel}`, cls: "cms-seo-label" });
 
-        // v1.8.0: Show individual SEO check breakdown
+        // Show individual SEO check breakdown
         if (cached.seoChecks && cached.seoChecks.length > 0) {
           const checksList = seoWrapper.createEl("div", { cls: "cms-seo-checks" });
           for (const check of cached.seoChecks) {
@@ -150,7 +168,7 @@ export class IsHistorySidebarView extends ItemView {
         }
       }
 
-      // v1.7.0: Stale indicator
+      // Stale indicator
       if (settings.showStaleBadge && cached && cached.isStale) {
         container.createEl("div", {
           text: `Stale content — not modified in ${settings.staleThresholdDays}+ days`,
@@ -185,7 +203,9 @@ export class IsHistorySidebarView extends ItemView {
       }
 
       const actions = container.createEl("div", { cls: "cms-sidebar-actions" });
-      if (collection === "archive" && cached && cached.draft) {
+      // v1.9.0: Use collection config's canCreateNew to decide whether to show pre-flight
+      const canCreateNew = collectionConfig ? collectionConfig.canCreateNew : collection === "archive";
+      if (canCreateNew && cached && cached.draft) {
         actions
           .createEl("button", { text: "Pre-flight this post", cls: "cms-btn cms-btn-primary cms-btn-full" })
           .addEventListener("click", async () => {

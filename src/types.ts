@@ -2,8 +2,7 @@
  * isHistory CMS Plugin — Type Definitions
  *
  * Central type declarations shared across all modules.
- * v1.5.0: Fully dynamic tracks, statuses, validation thresholds,
- * display limits, template engine, and pre-flight configuration.
+ * v1.9.0: Dynamic collections system replacing hardcoded archive/vault model.
  */
 
 import { TFile } from "obsidian";
@@ -30,6 +29,59 @@ export const DEFAULT_TRACKS: Record<string, TrackInfo> = {
 /** Default status values — used as initial settings value */
 export const DEFAULT_STATUSES = ["published", "upcoming", "planned"] as const;
 export type Status = string;
+
+// ─── v1.9.0: Dynamic Collections ───
+
+export interface CollectionConfig {
+  /** Unique collection ID (e.g. "archive", "vault", "knowledge-base") */
+  id: string;
+  /** Display name (e.g. "Blog Posts", "Research Notes") */
+  name: string;
+  /** Content folder path (e.g. "src/content/blog") */
+  path: string;
+  /** Emoji for UI badges (e.g. "📝") */
+  emoji: string;
+  /** Color for dashboard (e.g. "#7c3aed") */
+  color: string;
+  /** What SEO scoring to apply */
+  seoMode: "full" | "basic" | "none";
+  /** Frontmatter fields required for this collection */
+  requiredFields: string[];
+  /** Whether image is required for full SEO score */
+  imageRequired: boolean;
+  /** Whether new posts can be created in this collection */
+  canCreateNew: boolean;
+  /** Default draft state for new items in this collection */
+  defaultDraft: boolean;
+}
+
+/** Default collections — mirrors the original archive/vault model */
+export const DEFAULT_COLLECTIONS: CollectionConfig[] = [
+  {
+    id: "archive",
+    name: "Archive",
+    path: "src/content/blog",
+    emoji: "\u{1F4DD}",
+    color: "#7c3aed",
+    seoMode: "full",
+    requiredFields: ["title", "date", "description"],
+    imageRequired: true,
+    canCreateNew: true,
+    defaultDraft: true,
+  },
+  {
+    id: "vault",
+    name: "Vault",
+    path: "src/content/vault",
+    emoji: "\u{1F512}",
+    color: "#3b82f6",
+    seoMode: "basic",
+    requiredFields: ["title"],
+    imageRequired: false,
+    canCreateNew: false,
+    defaultDraft: true,
+  },
+];
 
 // ─── Validation ───
 
@@ -92,7 +144,8 @@ export function getValidationConfig(settings: IsHistorySettings): ValidationConf
 
 // ─── Content Items ───
 
-export type CollectionType = "archive" | "vault";
+/** v1.9.0: CollectionType is now a dynamic string (any collection ID) */
+export type CollectionType = string;
 
 export interface ContentItem {
   file: TFile;
@@ -125,12 +178,16 @@ export interface ContentItem {
   seoChecks: SEOCheck[];
 }
 
-// ─── Cache Stats ───
+// ─── Cache Stats
 
 export interface CacheStats {
   total: number;
+  /** @deprecated Use collectionTotals["archive"] instead */
   archiveTotal: number;
+  /** @deprecated Use collectionTotals["vault"] instead */
   vaultTotal: number;
+  /** v1.9.0: Per-collection item counts */
+  collectionTotals: Record<string, number>;
   drafts: number;
   published: number;
   upcoming: number;
@@ -150,13 +207,18 @@ export interface CacheStats {
 
 // ─── Settings ───
 
-export const SETTINGS_VERSION = 10;
+export const SETTINGS_VERSION = 11;
 
 export interface IsHistorySettings {
   _version: number;
 
-  // ─── Content Paths ───
+  // ─── v1.9.0: Dynamic Collections ───
+  collections: CollectionConfig[];
+
+  // ─── Content Paths (deprecated — kept for backward compat) ───
+  /** @deprecated Use collections[0].path instead */
   archivePath: string;
+  /** @deprecated Use collections[1].path instead */
   vaultPath: string;
 
   // ─── Tracks & Statuses (fully dynamic) ───
@@ -213,12 +275,19 @@ export interface IsHistorySettings {
   // ─── v1.8.0: Content Health Report ───
   /** Path where health reports are saved */
   reportPath: string;
+
+  // ─── v1.9.0: Configurable thresholds ───
+  /** Low SEO score threshold (default 55) */
+  seoLowScoreThreshold: number;
+  /** Recent threshold in hours (default 24) */
+  recentThresholdHours: number;
 }
 
 export const DEFAULT_SETTINGS: IsHistorySettings = {
   _version: SETTINGS_VERSION,
   archivePath: "src/content/blog",
   vaultPath: "src/content/vault",
+  collections: DEFAULT_COLLECTIONS.map((c) => ({ ...c })),
   cardsPerPage: 40,
   showRibbonIcon: true,
   defaultSeries: "minds-and-machines",
@@ -272,6 +341,10 @@ export const DEFAULT_SETTINGS: IsHistorySettings = {
 
   // v1.8.0: Content Health Report
   reportPath: "isHistory-Report.md",
+
+  // v1.9.0: Configurable thresholds
+  seoLowScoreThreshold: 55,
+  recentThresholdHours: 24,
 };
 
 // ─── v1.8.0: Track Template ───
@@ -343,6 +416,34 @@ export function buildConnectsRefRegex(tracks: Record<string, TrackInfo>): RegExp
   return new RegExp(`^[${codes}]\\d+$`);
 }
 
+// ─── v1.9.0: Collection Helpers ───
+
+/** Get a collection config by ID from settings */
+export function getCollectionConfig(settings: IsHistorySettings, collectionId: string): CollectionConfig | undefined {
+  return settings.collections.find((c) => c.id === collectionId);
+}
+
+/**
+ * Find which collection a file path belongs to using longest-path-first matching.
+ * This fixes the prefix bug where "src/content/blog-vault" would incorrectly match "src/content/blog".
+ */
+export function findCollectionByPath(settings: IsHistorySettings, filePath: string): CollectionConfig | undefined {
+  // Sort by path length descending (longest first) to ensure most specific match wins
+  const sorted = [...settings.collections]
+    .filter((c) => c.path && c.path.trim() !== "")
+    .sort((a, b) => b.path.length - a.path.length);
+
+  for (const col of sorted) {
+    const normalizedPath = normalizePathSetting(col.path);
+    if (!normalizedPath) continue;
+    // Boundary-aware: must match exact path or path + separator
+    if (filePath === normalizedPath || filePath.startsWith(normalizedPath + "/")) {
+      return col;
+    }
+  }
+  return undefined;
+}
+
 // ─── Template Engine ───
 
 /** Substitute {{variable}} placeholders in a template string */
@@ -386,7 +487,15 @@ export function hexToRgba(hex: string, alpha: number): string {
 
 export type SortMode = "seriesOrder" | "dateNewest" | "dateOldest" | "titleAZ" | "errorsFirst" | "draftsFirst" | "seoScore";
 
-/** Time threshold for "recently modified" filter (24 hours in ms) */
+/** v1.9.0: RECENT_THRESHOLD_HOURS is now configurable via settings */
+export const RECENT_THRESHOLD_HOURS_DEFAULT = 24;
+
+/** Time threshold for "recently modified" filter (default 24 hours in ms) */
+export function getRecentThresholdMs(settings: IsHistorySettings): number {
+  return (settings.recentThresholdHours || RECENT_THRESHOLD_HOURS_DEFAULT) * 60 * 60 * 1000;
+}
+
+/** Legacy constant — kept for backward compat; prefer getRecentThresholdMs() */
 export const RECENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 /** v1.7.0: Default stale threshold in ms (30 days) */

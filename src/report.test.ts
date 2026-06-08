@@ -52,6 +52,7 @@ function makeStats(overrides: Partial<CacheStats> = {}): CacheStats {
     total: 5,
     archiveTotal: 4,
     vaultTotal: 1,
+    collectionTotals: { archive: 4, vault: 1 },
     drafts: 1,
     published: 3,
     upcoming: 0,
@@ -91,7 +92,7 @@ describe("generateHealthReport", () => {
     const stats = makeStats({ total: 3 });
     const report = generateHealthReport(items, stats, DEFAULT_SETTINGS);
 
-    expect(report.version).toBe("1.8.0");
+    expect(report.version).toBe("1.9.0");
     expect(report.generatedAt).toBeTruthy();
     expect(report.healthScore).toBeGreaterThanOrEqual(0);
     expect(report.healthScore).toBeLessThanOrEqual(100);

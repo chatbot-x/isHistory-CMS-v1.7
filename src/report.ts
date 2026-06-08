@@ -1,12 +1,12 @@
 /**
  * isHistory CMS Plugin — Content Health Report Generator
  *
- * v1.8.0: Generates a markdown health report summarizing validation
- * errors, SEO scores, stale content, and actionable recommendations.
- * Pure-function architecture for testability.
+ * v1.9.0: Collection-aware health reports, configurable thresholds,
+ * shared grade constants, per-collection breakdowns.
  */
 
-import type { ContentItem, CacheStats, IsHistorySettings } from "./types";
+import type { ContentItem, CacheStats, IsHistorySettings, CollectionConfig } from "./types";
+import { SEO_GRADE_THRESHOLDS, SEO_GRADE_COLORS } from "./seo";
 
 // ─── Report Types ───
 
@@ -21,6 +21,8 @@ export interface HealthReport {
   summary: ReportSummary;
   /** Per-track breakdown */
   trackBreakdown: TrackBreakdown[];
+  /** v1.9.0: Per-collection breakdown */
+  collectionBreakdown: CollectionBreakdown[];
   /** Items needing attention (sorted by severity) */
   attentionItems: AttentionItem[];
   /** Quick-win recommendations */
@@ -50,6 +52,19 @@ export interface TrackBreakdown {
   avgSeo: number;
 }
 
+/** v1.9.0: Per-collection breakdown */
+export interface CollectionBreakdown {
+  id: string;
+  name: string;
+  emoji: string;
+  count: number;
+  errors: number;
+  warnings: number;
+  drafts: number;
+  avgSeo: number;
+  seoMode: string;
+}
+
 export interface AttentionItem {
   path: string;
   title: string;
@@ -66,18 +81,19 @@ export interface AttentionItem {
 
 /**
  * Generate a content health report from cached items.
- * This is a pure function with no Obsidian API dependencies.
+ * v1.9.0: Accept version as parameter, collection-aware thresholds.
  */
 export function generateHealthReport(
   items: ContentItem[],
   stats: CacheStats,
   settings: IsHistorySettings,
-  version = "1.8.0",
+  version = "1.9.0",
 ): HealthReport {
-  const summary = buildSummary(items, stats);
+  const summary = buildSummary(items, stats, settings);
   const trackBreakdown = buildTrackBreakdown(items, settings);
+  const collectionBreakdown = buildCollectionBreakdown(items, settings);
   const attentionItems = buildAttentionItems(items, settings);
-  const recommendations = buildRecommendations(items, stats, summary);
+  const recommendations = buildRecommendations(items, stats, summary, settings);
   const healthScore = calculateHealthScore(summary);
 
   return {
@@ -86,6 +102,7 @@ export function generateHealthReport(
     healthScore,
     summary,
     trackBreakdown,
+    collectionBreakdown,
     attentionItems,
     recommendations,
   };
@@ -93,9 +110,10 @@ export function generateHealthReport(
 
 // ─── Summary Builder ───
 
-function buildSummary(items: ContentItem[], stats: CacheStats): ReportSummary {
+function buildSummary(items: ContentItem[], stats: CacheStats, settings: IsHistorySettings): ReportSummary {
+  const lowSeoThreshold = settings.seoLowScoreThreshold ?? 55;
   const lowSeoItems = items.filter(
-    (i) => i.seoScore !== null && i.seoScore < 55,
+    (i) => i.seoScore !== null && i.seoScore < lowSeoThreshold,
   ).length;
 
   return {
@@ -166,6 +184,41 @@ function buildTrackBreakdown(
   return breakdowns;
 }
 
+// ─── v1.9.0: Collection Breakdown ───
+
+function buildCollectionBreakdown(
+  items: ContentItem[],
+  settings: IsHistorySettings,
+): CollectionBreakdown[] {
+  const breakdowns: CollectionBreakdown[] = [];
+
+  for (const col of settings.collections) {
+    const colItems = items.filter((i) => i.collection === col.id);
+    const scored = colItems.filter((i) => i.seoScore !== null);
+    const avgSeo =
+      scored.length > 0
+        ? Math.round(
+            scored.reduce((sum, i) => sum + (i.seoScore || 0), 0) /
+              scored.length,
+          )
+        : 0;
+
+    breakdowns.push({
+      id: col.id,
+      name: col.name,
+      emoji: col.emoji,
+      count: colItems.length,
+      errors: colItems.filter((i) => i.validation.status === "error").length,
+      warnings: colItems.filter((i) => i.validation.status === "warning").length,
+      drafts: colItems.filter((i) => i.draft).length,
+      avgSeo,
+      seoMode: col.seoMode,
+    });
+  }
+
+  return breakdowns;
+}
+
 // ─── Attention Items ───
 
 function buildAttentionItems(
@@ -173,6 +226,7 @@ function buildAttentionItems(
   settings: IsHistorySettings,
 ): AttentionItem[] {
   const attentionList: AttentionItem[] = [];
+  const lowSeoThreshold = settings.seoLowScoreThreshold ?? 55;
 
   for (const item of items) {
     const issues: string[] = [];
@@ -195,8 +249,8 @@ function buildAttentionItems(
       issues.push(`Warnings: ${warnFields.join(", ")}`);
     }
 
-    // Low SEO score
-    if (item.seoScore !== null && item.seoScore < 55) {
+    // Low SEO score (configurable threshold)
+    if (item.seoScore !== null && item.seoScore < lowSeoThreshold) {
       issues.push(`Low SEO score: ${item.seoScore}/100`);
     }
 
@@ -246,8 +300,11 @@ function buildRecommendations(
   items: ContentItem[],
   stats: CacheStats,
   summary: ReportSummary,
+  settings: IsHistorySettings,
 ): string[] {
   const recs: string[] = [];
+  const lowSeoThreshold = settings.seoLowScoreThreshold ?? 55;
+  const minTags = settings.seoMinTags ?? 2;
 
   // Error items
   if (summary.errorItems > 0) {
@@ -259,14 +316,14 @@ function buildRecommendations(
   // Low SEO items
   if (summary.lowSeoItems > 0) {
     recs.push(
-      `Improve SEO for ${summary.lowSeoItems} item(s) scoring below 55 — add descriptions, tags, or images.`,
+      `Improve SEO for ${summary.lowSeoItems} item(s) scoring below ${lowSeoThreshold} — add descriptions, tags, or images.`,
     );
   }
 
   // Stale items
   if (summary.staleItems > 0) {
     recs.push(
-      `Review ${summary.staleItems} stale item(s) — update or archive content older than ${stats.stale > 0 ? "the threshold" : "30 days"}.`,
+      `Review ${summary.staleItems} stale item(s) — update or archive content older than ${settings.staleThresholdDays} days.`,
     );
   }
 
@@ -277,34 +334,39 @@ function buildRecommendations(
     );
   }
 
-  // Missing descriptions
-  const noDesc = items.filter(
-    (i) => i.collection === "archive" && !i.description,
-  ).length;
-  if (noDesc > 0) {
-    recs.push(
-      `Add descriptions to ${noDesc} archive post(s) — meta descriptions improve click-through rates.`,
-    );
-  }
+  // v1.9.0: Collection-aware recommendations
+  for (const col of settings.collections) {
+    const colItems = items.filter((i) => i.collection === col.id);
 
-  // Missing images
-  const noImage = items.filter(
-    (i) => i.collection === "archive" && !i.image,
-  ).length;
-  if (noImage > 0) {
-    recs.push(
-      `Add hero images to ${noImage} archive post(s) — images improve social sharing and SEO.`,
-    );
-  }
+    // Missing descriptions (only for collections with full/basic SEO)
+    if (col.seoMode !== "none") {
+      const noDesc = colItems.filter((i) => !i.description).length;
+      if (noDesc > 0) {
+        recs.push(
+          `Add descriptions to ${noDesc} ${col.name} post(s) — meta descriptions improve click-through rates.`,
+        );
+      }
+    }
 
-  // Low tag count
-  const lowTags = items.filter(
-    (i) => i.collection === "archive" && i.tags.length < 2,
-  ).length;
-  if (lowTags > 0) {
-    recs.push(
-      `Add tags to ${lowTags} archive post(s) — at least 2 tags improve discoverability.`,
-    );
+    // Missing images (only for collections where images are required)
+    if (col.imageRequired) {
+      const noImage = colItems.filter((i) => !i.image).length;
+      if (noImage > 0) {
+        recs.push(
+          `Add hero images to ${noImage} ${col.name} post(s) — images improve social sharing and SEO.`,
+        );
+      }
+    }
+
+    // Low tag count (only for collections with full SEO)
+    if (col.seoMode === "full") {
+      const lowTags = colItems.filter((i) => i.tags.length < minTags).length;
+      if (lowTags > 0) {
+        recs.push(
+          `Add tags to ${lowTags} ${col.name} post(s) — at least ${minTags} tags improve discoverability.`,
+        );
+      }
+    }
   }
 
   if (recs.length === 0) {
@@ -351,7 +413,6 @@ function calculateHealthScore(summary: ReportSummary): number {
     Math.round(100 - errorPenalty - warningPenalty - draftPenalty - stalePenalty + seoPoints - (seoPoints > 0 ? 0 : 0)),
   );
 
-  // Clamp: if no errors/warnings/drafts/stale, give full credit minus SEO gap
   return Math.min(100, Math.max(0, score));
 }
 
@@ -389,6 +450,20 @@ export function renderReportMarkdown(report: HealthReport): string {
   lines.push(`| Unique Tags | ${s.uniqueTags} |`);
   lines.push(`| Unique Eras | ${s.uniqueEras} |`);
   lines.push(``);
+
+  // v1.9.0: Collection breakdown
+  if (report.collectionBreakdown.length > 0) {
+    lines.push(`## Collection Breakdown`);
+    lines.push(``);
+    lines.push(`| Collection | Items | Errors | Warnings | Drafts | Avg SEO | SEO Mode |`);
+    lines.push(`|------------|-------|--------|----------|--------|---------|----------|`);
+    for (const c of report.collectionBreakdown) {
+      lines.push(
+        `| ${c.emoji} ${c.name} | ${c.count} | ${c.errors} | ${c.warnings} | ${c.drafts} | ${c.avgSeo} | ${c.seoMode} |`,
+      );
+    }
+    lines.push(``);
+  }
 
   // Track breakdown
   if (report.trackBreakdown.length > 0) {
@@ -446,10 +521,11 @@ export function renderReportMarkdown(report: HealthReport): string {
   return lines.join("\n");
 }
 
+/** v1.9.0: Use shared thresholds for health label */
 function _healthLabel(score: number): string {
-  if (score >= 90) return "(Excellent)";
-  if (score >= 75) return "(Good)";
-  if (score >= 55) return "(Fair)";
-  if (score >= 35) return "(Needs Work)";
+  if (score >= SEO_GRADE_THRESHOLDS.A) return "(Excellent)";
+  if (score >= SEO_GRADE_THRESHOLDS.B) return "(Good)";
+  if (score >= SEO_GRADE_THRESHOLDS.C) return "(Fair)";
+  if (score >= SEO_GRADE_THRESHOLDS.D) return "(Needs Work)";
   return "(Poor)";
 }

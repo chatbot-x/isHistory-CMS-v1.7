@@ -11,9 +11,13 @@ import type { IsHistorySettings, ContentItem, ValidationResult } from "./types";
 // ─── Mock helpers ───
 
 const defaultSettings: IsHistorySettings = {
-  _version: 9,
+  _version: 11,
   archivePath: "src/content/blog",
   vaultPath: "src/content/vault",
+  collections: [
+    { id: "archive", name: "Archive", path: "src/content/blog", emoji: "\u{1F4DD}", color: "#7c3aed", seoMode: "full", requiredFields: ["title", "date", "description"], imageRequired: true, canCreateNew: true, defaultDraft: true },
+    { id: "vault", name: "Vault", path: "src/content/vault", emoji: "\u{1F512}", color: "#3b82f6", seoMode: "basic", requiredFields: ["title"], imageRequired: false, canCreateNew: false, defaultDraft: true },
+  ],
   cardsPerPage: 40,
   showRibbonIcon: true,
   defaultSeries: "minds-and-machines",
@@ -47,6 +51,10 @@ const defaultSettings: IsHistorySettings = {
   seoDescOptimalMax: 160,
   seoMinWordCount: 300,
   seoMinTags: 2,
+  trackTemplates: {},
+  reportPath: "isHistory-Report.md",
+  seoLowScoreThreshold: 55,
+  recentThresholdHours: 24,
 };
 
 function makeItem(overrides: Partial<ContentItem> & { path: string }): ContentItem {
@@ -74,6 +82,7 @@ function makeItem(overrides: Partial<ContentItem> & { path: string }): ContentIt
     validation: { status: "ready", label: "Ready", errors: [] },
     seoScore: null,
     isStale: false,
+    seoChecks: [],
     ...overrides,
   };
 }
@@ -101,6 +110,10 @@ describe("ContentCache._getCollection", () => {
       ...defaultSettings,
       archivePath: "posts",
       vaultPath: "notes",
+      collections: [
+        { id: "archive", name: "Archive", path: "posts", emoji: "\u{1F4DD}", color: "#7c3aed", seoMode: "full", requiredFields: ["title", "date", "description"], imageRequired: true, canCreateNew: true, defaultDraft: true },
+        { id: "vault", name: "Vault", path: "notes", emoji: "\u{1F512}", color: "#3b82f6", seoMode: "basic", requiredFields: ["title"], imageRequired: false, canCreateNew: false, defaultDraft: true },
+      ],
     };
     expect(cache._getCollection("posts/my-post.md", customSettings)).toBe("archive");
     expect(cache._getCollection("notes/my-note.md", customSettings)).toBe("vault");
@@ -111,6 +124,10 @@ describe("ContentCache._getCollection", () => {
       ...defaultSettings,
       archivePath: "src/content/blog/",
       vaultPath: "src/content/vault/",
+      collections: [
+        { id: "archive", name: "Archive", path: "src/content/blog/", emoji: "\u{1F4DD}", color: "#7c3aed", seoMode: "full", requiredFields: ["title", "date", "description"], imageRequired: true, canCreateNew: true, defaultDraft: true },
+        { id: "vault", name: "Vault", path: "src/content/vault/", emoji: "\u{1F512}", color: "#3b82f6", seoMode: "basic", requiredFields: ["title"], imageRequired: false, canCreateNew: false, defaultDraft: true },
+      ],
     };
     expect(cache._getCollection("src/content/blog/post.md", slashSettings)).toBe("archive");
     expect(cache._getCollection("src/content/vault/notes.md", slashSettings)).toBe("vault");

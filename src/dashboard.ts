@@ -2,8 +2,7 @@
  * isHistory CMS Plugin — Dashboard View
  *
  * Full content management UI with differential rendering.
- * v1.6.0: Sort options dropdown, recently modified filter,
- * search debounce for better performance with many cards.
+ * v1.9.0: Dynamic collection filters, stats, and SEO badge colors from shared constants.
  */
 
 import { ItemView, type WorkspaceLeaf, Notice, Modal, TFile } from "obsidian";
@@ -12,8 +11,10 @@ import {
   type TrackCode,
   type SortMode,
   DEFAULT_SETTINGS,
+  findCollectionByPath,
 } from "./types";
 import IsHistoryPlugin from "./main";
+import { SEO_GRADE_COLORS, SEO_GRADE_THRESHOLDS, getSEOLabel } from "./seo";
 
 export const VIEW_TYPE_DASHBOARD = "ishistory-dashboard";
 
@@ -45,7 +46,6 @@ export class IsHistoryDashboardView extends ItemView {
   private _itemSnapshots: Map<string, string> = new Map();
   private _rendering = false;
   private _renderTimer: ReturnType<typeof setTimeout> | null = null;
-  // Feature 10: Search debounce timer
   private _searchTimer: ReturnType<typeof setTimeout> | null = null;
   // v1.8.0: Bulk select mode
   private _bulkMode = false;
@@ -219,14 +219,12 @@ export class IsHistoryDashboardView extends ItemView {
       });
       searchInput.setAttribute("aria-label", "Search posts, figures, tags");
 
-      // Feature 10: Search debounce (200ms)
       searchInput.addEventListener("input", () => {
         this.searchQuery = searchInput.value;
         if (this._searchTimer) clearTimeout(this._searchTimer);
         this._searchTimer = setTimeout(() => this.applyFilters(), 200);
       });
 
-      // Feature 7: Sort dropdown
       const sortSelect = toolbar.createEl("select", { cls: "cms-sort-select" });
       sortSelect.setAttribute("aria-label", "Sort posts by");
       for (const opt of SORT_OPTIONS) {
@@ -282,7 +280,6 @@ export class IsHistoryDashboardView extends ItemView {
           catch (e) { console.error(e); }
         });
 
-      // v1.8.0: Bulk select toggle + Health Report button
       actionsGroup
         .createEl("button", {
           text: this._bulkMode ? "Exit Select" : "Select",
@@ -298,7 +295,6 @@ export class IsHistoryDashboardView extends ItemView {
         .createEl("button", { text: "Health Report", cls: "cms-btn cms-btn-secondary" })
         .addEventListener("click", () => { void this.plugin.generateHealthReport(); });
 
-      // v1.8.0: Bulk action bar (visible when in bulk mode with selections)
       if (this._bulkMode && this._selectedPaths.size > 0) {
         const bulkBar = toolbar.createEl("div", { cls: "cms-bulk-bar" });
         bulkBar.createEl("span", {
@@ -356,24 +352,25 @@ export class IsHistoryDashboardView extends ItemView {
     }
   }
 
-  /** Build filter list dynamically from tracks and statuses, plus "recent" and v1.7.0 filters */
+  /** v1.9.0: Build filter list dynamically from collections + tracks */
   private _buildFilterList(): { key: string; label: string }[] {
     const settings = this.plugin.settings;
     const filters: { key: string; label: string }[] = [
       { key: "all", label: "All" },
-      { key: "archive", label: "Archive" },
     ];
-    for (const [code, info] of Object.entries(settings.tracks)) {
-      filters.push({ key: `track-${code}`, label: `${code} ${info.name}` });
+    // Dynamic collection filters
+    for (const col of settings.collections) {
+      filters.push({ key: `collection-${col.id}`, label: `${col.emoji} ${col.name}` });
     }
-    filters.push({ key: "vault", label: "Vault" });
+    // Legacy compat: also add "archive" and "vault" if they exist as collection IDs
+    for (const trackCode of Object.keys(settings.tracks)) {
+      const trackInfo = settings.tracks[trackCode];
+      filters.push({ key: `track-${trackCode}`, label: `${trackCode} ${trackInfo.name}` });
+    }
     filters.push({ key: "drafts", label: "Drafts" });
-    // Feature 8: Recently modified filter
     filters.push({ key: "recent", label: "Recent" });
-    // v1.7.0: Stale content filter
     filters.push({ key: "stale", label: "Stale" });
     filters.push({ key: "errors", label: "Errors" });
-    // v1.7.0: Low SEO filter
     if (settings.showSeoScore) {
       filters.push({ key: "lowSeo", label: "Low SEO" });
     }
@@ -416,7 +413,7 @@ export class IsHistoryDashboardView extends ItemView {
     this.applyFilters();
   }
 
-  // ─── Stats Rendering (dynamic tracks) ───
+  // ─── v1.9.0: Stats Rendering with dynamic collections ───
 
   private _renderStats(): void {
     if (!this._statsEl) return;
@@ -424,25 +421,30 @@ export class IsHistoryDashboardView extends ItemView {
       this._statsEl.empty();
       const settings = this.plugin.settings;
       const s = this.plugin.cache.getStats(settings);
-      const cards = [
-        { label: "Archive", value: s.archiveTotal, cls: "" },
-        { label: "Vault", value: s.vaultTotal, cls: "cms-stat-vault" },
-      ];
+      const cards: { label: string; value: number; cls: string }[] = [];
+
+      // Dynamic collection stats
+      for (const col of settings.collections) {
+        const total = s.collectionTotals[col.id] || 0;
+        const colId = col.id.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+        cards.push({ label: col.name, value: total, cls: `cms-stat-collection-${colId}` });
+      }
+      // Track counts
       for (const [code, info] of Object.entries(settings.tracks)) {
         cards.push({ label: `${code} ${info.name}`, value: s.trackCounts[code] || 0, cls: `cms-stat-track-${code.toLowerCase()}` });
       }
-    // v1.7.0: SEO & Stale stats
-    if (settings.showSeoScore) {
-      cards.push({ label: "Avg SEO", value: s.avgSeoScore, cls: "cms-stat-seo" });
-    }
-    if (settings.showStaleBadge && s.stale > 0) {
-      cards.push({ label: "Stale", value: s.stale, cls: "cms-stat-stale" });
-    }
-    cards.push(
-      { label: "Drafts", value: s.drafts, cls: "cms-stat-warning" },
-      { label: "Errors", value: s.errors, cls: "cms-stat-error" },
-      { label: "Ready", value: s.ready, cls: "cms-stat-success" },
-    );
+      // SEO & Stale stats
+      if (settings.showSeoScore) {
+        cards.push({ label: "Avg SEO", value: s.avgSeoScore, cls: "cms-stat-seo" });
+      }
+      if (settings.showStaleBadge && s.stale > 0) {
+        cards.push({ label: "Stale", value: s.stale, cls: "cms-stat-stale" });
+      }
+      cards.push(
+        { label: "Drafts", value: s.drafts, cls: "cms-stat-warning" },
+        { label: "Errors", value: s.errors, cls: "cms-stat-error" },
+        { label: "Ready", value: s.ready, cls: "cms-stat-success" },
+      );
       for (const c of cards) {
         const el = this._statsEl.createEl("div", { cls: `cms-stat-card ${c.cls}` });
         el.createEl("div", { text: String(c.value), cls: "cms-stat-value" });
@@ -451,10 +453,11 @@ export class IsHistoryDashboardView extends ItemView {
     } catch (e) { console.error(e); }
   }
 
-  // ─── Card DOM Building (settings-driven display limits) ───
+  // ─── Card DOM Building ───
 
   private _buildCardDOM(item: ContentItem): HTMLElement {
     const settings = this.plugin.settings;
+    const collectionConfig = findCollectionByPath(settings, item.path);
     const card = document.createElement("div");
     card.className = `cms-card cms-card-${item.validation.status} cms-card-${item.collection}${item.track ? " cms-card-track-" + item.track : ""}${this._bulkMode && this._selectedPaths.has(item.path) ? " cms-card-selected" : ""}`;
     card.setAttribute("data-path", item.path);
@@ -484,7 +487,6 @@ export class IsHistoryDashboardView extends ItemView {
           this._selectedPaths.delete(item.path);
           card.removeClass("cms-card-selected");
         }
-        // Re-render to show bulk action bar
         this.renderDashboard();
       });
     }
@@ -501,6 +503,15 @@ export class IsHistoryDashboardView extends ItemView {
     titleArea.createEl("span", { text: item.title, cls: "cms-card-title" });
 
     const badgeArea = cardHeader.createEl("div", { cls: "cms-card-badges" });
+
+    // v1.9.0: Collection badge using config emoji/name
+    if (collectionConfig) {
+      badgeArea.createEl("span", {
+        text: `${collectionConfig.emoji} ${collectionConfig.name}`,
+        cls: "cms-badge cms-badge-collection",
+      });
+    }
+
     if (item.track && settings.tracks[item.track]) {
       const trackInfo = settings.tracks[item.track];
       badgeArea.createEl("span", {
@@ -515,9 +526,13 @@ export class IsHistoryDashboardView extends ItemView {
       cls: `cms-badge cms-badge-${item.validation.status === "ready" ? "success" : item.validation.status === "error" ? "error" : "warning"}`,
     });
 
-    // v1.7.0: SEO Score badge
+    // v1.9.0: SEO Score badge using shared constants
     if (settings.showSeoScore && item.seoScore !== null) {
-      const seoColor = item.seoScore >= 90 ? "#10b981" : item.seoScore >= 75 ? "#3b82f6" : item.seoScore >= 55 ? "#f59e0b" : item.seoScore >= 35 ? "#f97316" : "#ef4444";
+      const seoColor = item.seoScore >= SEO_GRADE_THRESHOLDS.A ? SEO_GRADE_COLORS.A
+        : item.seoScore >= SEO_GRADE_THRESHOLDS.B ? SEO_GRADE_COLORS.B
+        : item.seoScore >= SEO_GRADE_THRESHOLDS.C ? SEO_GRADE_COLORS.C
+        : item.seoScore >= SEO_GRADE_THRESHOLDS.D ? SEO_GRADE_COLORS.D
+        : SEO_GRADE_COLORS.F;
       badgeArea.createEl("span", {
         text: `SEO ${item.seoScore}`,
         cls: "cms-badge cms-badge-seo",
@@ -525,7 +540,6 @@ export class IsHistoryDashboardView extends ItemView {
       });
     }
 
-    // v1.7.0: Stale badge
     if (settings.showStaleBadge && item.isStale) {
       badgeArea.createEl("span", {
         text: "STALE",
@@ -618,7 +632,7 @@ export class IsHistoryDashboardView extends ItemView {
     } catch (e) { console.error(e); return null; }
   }
 
-  // ─── New Post (dynamic tracks) ───
+  // ─── New Post (v1.9.0: collection picker + track picker) ───
 
   private async _newPost(): Promise<void> {
     try {
@@ -627,6 +641,45 @@ export class IsHistoryDashboardView extends ItemView {
         new Notice("No tracks defined. Add a track in Settings first.");
         return;
       }
+
+      // v1.9.0: Let user pick collection first, then track
+      const creatableCollections = this.plugin.settings.collections.filter((c) => c.canCreateNew);
+
+      if (creatableCollections.length === 0) {
+        new Notice("No collections allow creating new posts. Check settings.");
+        return;
+      }
+
+      // If only one creatable collection, skip collection picker
+      let selectedCollectionId: string;
+      if (creatableCollections.length === 1) {
+        selectedCollectionId = creatableCollections[0].id;
+      } else {
+        // Show collection picker
+        selectedCollectionId = await new Promise<string>((resolve) => {
+          const colModal = new Modal(this.app);
+          colModal.titleEl.setText("New Post — Select Collection");
+          const body = colModal.contentEl.createEl("div", { cls: "cms-new-post-tracks" });
+
+          for (const col of creatableCollections) {
+            const btn = body.createEl("button", {
+              text: `${col.emoji} ${col.name}`,
+              cls: "cms-btn cms-btn-track-btn",
+            });
+            btn.addEventListener("click", () => {
+              colModal.close();
+              resolve(col.id);
+            });
+          }
+          body.createEl("button", { text: "Cancel", cls: "cms-btn cms-btn-secondary" })
+            .addEventListener("click", () => { colModal.close(); resolve(""); });
+          colModal.open();
+        });
+
+        if (!selectedCollectionId) return;
+      }
+
+      // Show track picker
       const trackModal = new Modal(this.app);
       trackModal.titleEl.setText("New Post — Select Track");
       const body = trackModal.contentEl.createEl("div", { cls: "cms-new-post-tracks" });
@@ -638,7 +691,7 @@ export class IsHistoryDashboardView extends ItemView {
         });
         btn.addEventListener("click", async () => {
           trackModal.close();
-          await this.plugin.newPost(code as TrackCode);
+          await this.plugin.newPost(code as TrackCode, selectedCollectionId);
         });
       }
       trackModal.open();
