@@ -119,7 +119,7 @@ export class IsHistorySidebarView extends ItemView {
       }
       fileInfo.createEl("span", { text: activeFile.path, cls: "cms-sidebar-file-title" });
 
-      // v1.7.0: SEO Score display
+      // v1.7.0 → v1.8.0: SEO Score display with check breakdown
       if (settings.showSeoScore && cached && cached.seoScore !== null) {
         const seoResult = cached.seoScore;
         const seoColor = seoResult >= 90 ? "#10b981" : seoResult >= 75 ? "#3b82f6" : seoResult >= 55 ? "#f59e0b" : seoResult >= 35 ? "#f97316" : "#ef4444";
@@ -128,6 +128,26 @@ export class IsHistorySidebarView extends ItemView {
         const scoreEl = seoWrapper.createEl("div", { cls: "cms-seo-score" });
         scoreEl.createEl("span", { text: String(seoResult), cls: "cms-seo-number", attr: { style: `color: ${seoColor}` } });
         scoreEl.createEl("span", { text: `/100 ${seoLabel}`, cls: "cms-seo-label" });
+
+        // v1.8.0: Show individual SEO check breakdown
+        if (cached.seoChecks && cached.seoChecks.length > 0) {
+          const checksList = seoWrapper.createEl("div", { cls: "cms-seo-checks" });
+          for (const check of cached.seoChecks) {
+            const checkEl = checksList.createEl("div", {
+              cls: `cms-seo-check ${check.passed ? "cms-seo-check-passed" : "cms-seo-check-failed"}`,
+            });
+            const icon = check.passed ? "\u2713" : "\u2717";
+            checkEl.createEl("span", { text: icon, cls: "cms-seo-check-icon" });
+            checkEl.createEl("span", { text: check.label, cls: "cms-seo-check-label" });
+            checkEl.createEl("span", {
+              text: `${check.points}/${check.maxPoints}`,
+              cls: "cms-seo-check-points",
+            });
+            if (!check.passed) {
+              checkEl.createEl("div", { text: check.hint, cls: "cms-seo-check-hint" });
+            }
+          }
+        }
       }
 
       // v1.7.0: Stale indicator

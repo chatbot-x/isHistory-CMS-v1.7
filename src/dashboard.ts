@@ -47,6 +47,9 @@ export class IsHistoryDashboardView extends ItemView {
   private _renderTimer: ReturnType<typeof setTimeout> | null = null;
   // Feature 10: Search debounce timer
   private _searchTimer: ReturnType<typeof setTimeout> | null = null;
+  // v1.8.0: Bulk select mode
+  private _bulkMode = false;
+  private _selectedPaths: Set<string> = new Set();
 
   constructor(leaf: WorkspaceLeaf, plugin: IsHistoryPlugin) {
     super(leaf);
@@ -279,6 +282,41 @@ export class IsHistoryDashboardView extends ItemView {
           catch (e) { console.error(e); }
         });
 
+      // v1.8.0: Bulk select toggle + Health Report button
+      actionsGroup
+        .createEl("button", {
+          text: this._bulkMode ? "Exit Select" : "Select",
+          cls: `cms-btn ${this._bulkMode ? "cms-btn-bulk-active" : "cms-btn-secondary"}`,
+        })
+        .addEventListener("click", () => {
+          this._bulkMode = !this._bulkMode;
+          this._selectedPaths.clear();
+          this.renderDashboard();
+        });
+
+      actionsGroup
+        .createEl("button", { text: "Health Report", cls: "cms-btn cms-btn-secondary" })
+        .addEventListener("click", () => { void this.plugin.generateHealthReport(); });
+
+      // v1.8.0: Bulk action bar (visible when in bulk mode with selections)
+      if (this._bulkMode && this._selectedPaths.size > 0) {
+        const bulkBar = toolbar.createEl("div", { cls: "cms-bulk-bar" });
+        bulkBar.createEl("span", {
+          text: `${this._selectedPaths.size} selected`,
+          cls: "cms-bulk-count",
+        });
+        bulkBar.createEl("button", { text: "Select All Visible", cls: "cms-btn cms-btn-sm cms-btn-secondary" })
+          .addEventListener("click", () => { this._selectAllVisible(); });
+        bulkBar.createEl("button", { text: "Deselect All", cls: "cms-btn cms-btn-sm cms-btn-secondary" })
+          .addEventListener("click", () => { this._selectedPaths.clear(); this.renderDashboard(); });
+        bulkBar.createEl("button", { text: "Toggle Draft", cls: "cms-btn cms-btn-sm cms-btn-primary" })
+          .addEventListener("click", () => { void this._bulkActionToggleDraft(); });
+        bulkBar.createEl("button", { text: "Validate", cls: "cms-btn cms-btn-sm cms-btn-secondary" })
+          .addEventListener("click", () => { this._bulkActionValidate(); });
+        bulkBar.createEl("button", { text: "Pre-flight", cls: "cms-btn cms-btn-sm cms-btn-primary" })
+          .addEventListener("click", () => { void this._bulkActionPreflight(); });
+      }
+
       // Grid
       this._gridEl = container.createEl("div", { cls: "cms-content-grid" });
       const items = cache.getSortedItems(undefined, settings.tracks, this.sortMode);
@@ -418,13 +456,38 @@ export class IsHistoryDashboardView extends ItemView {
   private _buildCardDOM(item: ContentItem): HTMLElement {
     const settings = this.plugin.settings;
     const card = document.createElement("div");
-    card.className = `cms-card cms-card-${item.validation.status} cms-card-${item.collection}${item.track ? " cms-card-track-" + item.track : ""}`;
+    card.className = `cms-card cms-card-${item.validation.status} cms-card-${item.collection}${item.track ? " cms-card-track-" + item.track : ""}${this._bulkMode && this._selectedPaths.has(item.path) ? " cms-card-selected" : ""}`;
     card.setAttribute("data-path", item.path);
     card.setAttribute("data-collection", item.collection);
     card.setAttribute("data-track", item.track || "");
     card.setAttribute("data-validation", item.validation.status);
     card.setAttribute("data-draft", String(item.draft));
     card.setAttribute("data-status", item.status);
+
+    // v1.8.0: Bulk select checkbox
+    if (this._bulkMode) {
+      const checkbox = card.createEl("input", {
+        cls: "cms-bulk-checkbox",
+        attr: {
+          type: "checkbox",
+          "aria-label": `Select ${item.title}`,
+        },
+      });
+      if (this._selectedPaths.has(item.path)) {
+        (checkbox as HTMLInputElement).checked = true;
+      }
+      checkbox.addEventListener("change", () => {
+        if ((checkbox as HTMLInputElement).checked) {
+          this._selectedPaths.add(item.path);
+          card.addClass("cms-card-selected");
+        } else {
+          this._selectedPaths.delete(item.path);
+          card.removeClass("cms-card-selected");
+        }
+        // Re-render to show bulk action bar
+        this.renderDashboard();
+      });
+    }
 
     // Header
     const cardHeader = card.createEl("div", { cls: "cms-card-header" });
@@ -656,5 +719,117 @@ export class IsHistoryDashboardView extends ItemView {
     this._cardElements.clear();
     this._pendingPaths.clear();
     this._itemSnapshots.clear();
+    this._selectedPaths.clear();
+  }
+
+  // ─── v1.8.0: Bulk Action Helpers ───
+
+  private _selectAllVisible(): void {
+    for (const [path, cardEl] of this._cardElements) {
+      if (cardEl.style.display !== "none") {
+        this._selectedPaths.add(path);
+      }
+    }
+    this.renderDashboard();
+  }
+
+  private _bulkActionValidate(): void {
+    let errors = 0;
+    let warnings = 0;
+    let ready = 0;
+    for (const path of this._selectedPaths) {
+      const item = this.plugin.cache.items.get(path);
+      if (!item) continue;
+      const r = this.plugin.validateFile(item.file);
+      if (r.status === "error") errors++;
+      else if (r.status === "warning") warnings++;
+      else ready++;
+    }
+    new Notice(
+      `${this._selectedPaths.size} posts: ${ready} ready, ${errors} errors, ${warnings} warnings`,
+    );
+  }
+
+  private async _bulkActionToggleDraft(): Promise<void> {
+    const items = [...this._selectedPaths]
+      .map((p) => this.plugin.cache.items.get(p))
+      .filter((i): i is ContentItem => !!i);
+
+    if (items.length === 0) return;
+
+    const confirmed = await new Promise<boolean>((resolve) => {
+      const modal = new Modal(this.app);
+      modal.titleEl.setText(`Toggle draft for ${items.length} post(s)?`);
+      const body = modal.contentEl.createEl("div");
+      body.createEl("p", {
+        text: `This will toggle the draft flag on ${items.length} selected post(s).`,
+      });
+      const btnRow = body.createEl("div", { cls: "cms-modal-btn-row" });
+      btnRow.createEl("button", { text: "Cancel", cls: "cms-btn cms-btn-secondary" })
+        .addEventListener("click", () => { modal.close(); resolve(false); });
+      btnRow.createEl("button", { text: "Toggle", cls: "cms-btn cms-btn-primary" })
+        .addEventListener("click", () => { modal.close(); resolve(true); });
+      modal.open();
+    });
+
+    if (!confirmed) return;
+
+    let toggled = 0;
+    for (const item of items) {
+      try {
+        await this.app.fileManager.processFrontMatter(item.file, (fm) => {
+          fm.draft = !fm.draft;
+        });
+        toggled++;
+      } catch (e) {
+        console.error(`Failed to toggle ${item.path}:`, e);
+      }
+    }
+    new Notice(`Toggled draft for ${toggled}/${items.length} post(s).`);
+    this._selectedPaths.clear();
+    this.plugin._updateStatusBar();
+    this.renderDashboard();
+  }
+
+  private async _bulkActionPreflight(): Promise<void> {
+    const items = [...this._selectedPaths]
+      .map((p) => this.plugin.cache.items.get(p))
+      .filter((i): i is ContentItem => !!i && i.draft);
+
+    if (items.length === 0) {
+      new Notice("No drafts selected for pre-flight.");
+      return;
+    }
+
+    const confirmed = await new Promise<boolean>((resolve) => {
+      const modal = new Modal(this.app);
+      modal.titleEl.setText(`Pre-flight ${items.length} draft(s)?`);
+      const body = modal.contentEl.createEl("div");
+      body.createEl("p", {
+        text: `This will pre-flight ${items.length} selected draft(s). They will be set to draft:${this.plugin.settings.preflightDraft}, status:"${this.plugin.settings.preflightStatus}".`,
+      });
+      const btnRow = body.createEl("div", { cls: "cms-modal-btn-row" });
+      btnRow.createEl("button", { text: "Cancel", cls: "cms-btn cms-btn-secondary" })
+        .addEventListener("click", () => { modal.close(); resolve(false); });
+      btnRow.createEl("button", { text: "Pre-flight", cls: "cms-btn cms-btn-primary" })
+        .addEventListener("click", () => { modal.close(); resolve(true); });
+      modal.open();
+    });
+
+    if (!confirmed) return;
+
+    let published = 0;
+    for (const item of items) {
+      try {
+        await this.plugin.preflightFile(item.file, true);
+        published++;
+      } catch (e) {
+        console.error(`Failed to pre-flight ${item.path}:`, e);
+      }
+    }
+    new Notice(`Pre-flighted ${published}/${items.length} draft(s).`);
+    this._selectedPaths.clear();
+    this.plugin._updateStatusBar();
+    this.renderDashboard();
   }
 }

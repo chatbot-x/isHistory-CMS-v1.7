@@ -11,6 +11,7 @@ import { Plugin, Notice, Modal, TFile, type Menu } from "obsidian";
 import {
   type IsHistorySettings,
   type TrackCode,
+  type TrackTemplate,
   type ValidationResult,
   type TrackInfo,
   DEFAULT_SETTINGS,
@@ -32,6 +33,7 @@ import {
   IsHistorySidebarView,
   VIEW_TYPE_SIDEBAR,
 } from "./sidebar";
+import { generateHealthReport, renderReportMarkdown } from "./report";
 
 export default class IsHistoryPlugin extends Plugin {
   settings!: IsHistorySettings;
@@ -118,6 +120,32 @@ export default class IsHistoryPlugin extends Plugin {
         id: "refresh-cache",
         name: "Refresh content cache",
         callback: () => this.refreshCache(),
+      });
+
+      // ─── v1.8.0: Content Health Report ───
+      this.addCommand({
+        id: "generate-health-report",
+        name: "Generate content health report",
+        callback: () => { void this.generateHealthReport(); },
+      });
+
+      // ─── v1.8.0: Bulk Operations ───
+      this.addCommand({
+        id: "bulk-toggle-drafts",
+        name: "Toggle draft status for all filtered items",
+        callback: () => { void this.bulkToggleDrafts(); },
+      });
+      this.addCommand({
+        id: "bulk-change-status",
+        name: "Change status for all filtered items",
+        callback: () => { void this.bulkChangeStatus(); },
+      });
+
+      // ─── v1.8.0: Refresh SEO with body content ───
+      this.addCommand({
+        id: "refresh-seo-scores",
+        name: "Refresh SEO scores with body content",
+        callback: () => { void this.refreshSEOScores(); },
       });
 
       // ─── Feature 9: Right-click context menus ───
@@ -524,6 +552,9 @@ export default class IsHistoryPlugin extends Plugin {
         return;
       }
 
+      // v1.8.0: Check for track-specific template overrides
+      const trackTpl: TrackTemplate = this.settings.trackTemplates[track] || {};
+
       const vars: Record<string, string> = {};
 
       // Use dynamic regex from track codes (supports multi-character codes)
@@ -545,7 +576,15 @@ export default class IsHistoryPlugin extends Plugin {
       vars.date = new Date().toISOString().split("T")[0];
       vars.series = this.settings.defaultSeries || "";
 
-      const slug = substituteVars(this.settings.newPostSlug, vars);
+      // v1.8.0: Use track-specific template or fall back to global template
+      const slugTemplate = trackTpl.slug || this.settings.newPostSlug;
+      const titleTemplate = trackTpl.title || this.settings.newPostTitle;
+      const imageTemplate = trackTpl.image || this.settings.newPostImage;
+      const seriesTemplate = trackTpl.series || this.settings.defaultSeries || "";
+      const statusTemplate = trackTpl.status || this.settings.newPostStatus;
+      const bodyTemplate = trackTpl.body || this.settings.newPostBody;
+
+      const slug = substituteVars(slugTemplate, vars);
       let path = `${normalizePathSetting(this.settings.archivePath)}/${slug}.md`;
 
       let suffix = 0;
@@ -553,18 +592,27 @@ export default class IsHistoryPlugin extends Plugin {
         suffix++;
         vars.seriesOrder = `${seriesOrder}-${suffix}`;
         vars.seriesOrderLower = `${seriesOrder.toLowerCase()}-${suffix}`;
-        const collSlug = substituteVars(this.settings.newPostSlug, vars);
+        const collSlug = substituteVars(slugTemplate, vars);
         path = `${normalizePathSetting(this.settings.archivePath)}/${collSlug}.md`;
       }
 
       vars.seriesOrder = suffix > 0 ? `${seriesOrder}-${suffix}` : seriesOrder;
       vars.seriesOrderLower = vars.seriesOrder.toLowerCase();
 
-      const title = substituteVars(this.settings.newPostTitle, vars);
-      const image = substituteVars(this.settings.newPostImage, vars);
-      const status = this.settings.newPostStatus;
-      const body = substituteVars(this.settings.newPostBody, vars);
-      const series = this.settings.defaultSeries || "";
+      const title = substituteVars(titleTemplate, vars);
+      const image = substituteVars(imageTemplate, vars);
+      const series = substituteVars(seriesTemplate, vars);
+      const status = substituteVars(statusTemplate, vars);
+      const body = substituteVars(bodyTemplate, vars);
+
+      // v1.8.0: Build frontmatter with track-specific extra fields
+      let extraFmLines = "";
+      if (trackTpl.extraFrontmatter) {
+        for (const [key, value] of Object.entries(trackTpl.extraFrontmatter)) {
+          const resolved = substituteVars(value, vars);
+          extraFmLines += `${key}: "${this._yamlSafe(resolved)}"\n`;
+        }
+      }
 
       const content = `---
 title: "${this._yamlSafe(title)}"
@@ -582,7 +630,7 @@ figures: ""
 connects: ""
 era: ""
 aliases: ["${this._yamlSafe(vars.seriesOrder)}"]
----
+${extraFmLines}---
 
 ${body}`;
 
@@ -729,6 +777,161 @@ ${body}`;
       new Notice("Content cache refreshed.");
     } catch (e) {
       new Notice(`Refresh failed: ${(e as Error).message}`);
+    }
+  }
+
+  // ─── v1.8.0: Content Health Report ───
+
+  async generateHealthReport() {
+    try {
+      this.cache.scanAll(this.app, this.settings);
+      // v1.8.0: Refresh SEO scores with body content for accurate report
+      await this.cache.refreshSEOWithBodies(this.app, this.settings);
+
+      const items = [...this.cache.items.values()];
+      const stats = this.cache.getStats(this.settings);
+      const report = generateHealthReport(items, stats, this.settings);
+      const markdown = renderReportMarkdown(report);
+
+      const reportPath = this.settings.reportPath || "isHistory-Report.md";
+      const existing = this.app.vault.getAbstractFileByPath(reportPath);
+      if (existing) {
+        await this.app.vault.modify(existing as TFile, markdown);
+      } else {
+        await this.app.vault.create(reportPath, markdown);
+      }
+
+      // Open the report file
+      const file = this.app.vault.getAbstractFileByPath(reportPath);
+      if (file instanceof TFile) {
+        await this.app.workspace.getLeaf(false).openFile(file);
+      }
+
+      new Notice(
+        `Health report generated! Score: ${report.healthScore}/100 — ${report.attentionItems.length} items need attention.`,
+      );
+    } catch (e) {
+      new Notice(`Report generation failed: ${(e as Error).message}`);
+    }
+  }
+
+  // ─── v1.8.0: Bulk Operations ───
+
+  async bulkToggleDrafts() {
+    try {
+      this.cache.scanAll(this.app, this.settings);
+      const drafts = [...this.cache.items.values()].filter((i) => i.draft);
+
+      if (drafts.length === 0) {
+        new Notice("No drafts found.");
+        return;
+      }
+
+      const confirmed = await new Promise<boolean>((resolve) => {
+        const modal = new Modal(this.app);
+        modal.titleEl.setText(`Toggle draft status for ${drafts.length} post(s)?`);
+        const body = modal.contentEl.createEl("div");
+        body.createEl("p", {
+          text: `This will toggle the draft flag on ${drafts.length} post(s). Drafts will be marked as published, and published posts will become drafts.`,
+        });
+        const btnRow = body.createEl("div", { cls: "cms-modal-btn-row" });
+        btnRow.createEl("button", { text: "Cancel", cls: "cms-btn cms-btn-secondary" })
+          .addEventListener("click", () => { modal.close(); resolve(false); });
+        btnRow.createEl("button", { text: "Toggle All", cls: "cms-btn cms-btn-primary" })
+          .addEventListener("click", () => { modal.close(); resolve(true); });
+        modal.open();
+      });
+
+      if (!confirmed) return;
+
+      let toggled = 0;
+      for (const item of drafts) {
+        try {
+          await this.app.fileManager.processFrontMatter(item.file, (fm) => {
+            fm.draft = !fm.draft;
+          });
+          toggled++;
+        } catch (e) {
+          console.error(`Failed to toggle ${item.path}:`, e);
+        }
+      }
+      new Notice(`Toggled draft status for ${toggled}/${drafts.length} post(s).`);
+      this._updateStatusBar();
+    } catch (e) {
+      new Notice(`Bulk toggle failed: ${(e as Error).message}`);
+    }
+  }
+
+  async bulkChangeStatus() {
+    try {
+      this.cache.scanAll(this.app, this.settings);
+      const archiveItems = [...this.cache.items.values()].filter(
+        (i) => i.collection === "archive",
+      );
+
+      if (archiveItems.length === 0) {
+        new Notice("No archive items found.");
+        return;
+      }
+
+      // Show status picker modal
+      const newStatus = await new Promise<string | null>((resolve) => {
+        const modal = new Modal(this.app);
+        modal.titleEl.setText("Set status for all archive posts");
+        const body = modal.contentEl.createEl("div");
+        body.createEl("p", {
+          text: `Choose the new status for ${archiveItems.length} archive post(s).`,
+        });
+        const btnRow = body.createEl("div", { cls: "cms-new-post-tracks" });
+        for (const status of this.settings.statuses) {
+          btnRow.createEl("button", { text: status, cls: "cms-btn cms-btn-track-btn" })
+            .addEventListener("click", () => { modal.close(); resolve(status); });
+        }
+        btnRow.createEl("button", { text: "Cancel", cls: "cms-btn cms-btn-secondary" })
+          .addEventListener("click", () => { modal.close(); resolve(null); });
+        modal.open();
+      });
+
+      if (!newStatus) return;
+
+      let changed = 0;
+      for (const item of archiveItems) {
+        try {
+          await this.app.fileManager.processFrontMatter(item.file, (fm) => {
+            fm.status = newStatus;
+          });
+          changed++;
+        } catch (e) {
+          console.error(`Failed to update ${item.path}:`, e);
+        }
+      }
+      new Notice(`Set status to "${newStatus}" for ${changed}/${archiveItems.length} post(s).`);
+      this._updateStatusBar();
+    } catch (e) {
+      new Notice(`Bulk status change failed: ${(e as Error).message}`);
+    }
+  }
+
+  // ─── v1.8.0: Refresh SEO Scores with Body Content ───
+
+  async refreshSEOScores() {
+    try {
+      this.cache.scanAll(this.app, this.settings);
+      await this.cache.refreshSEOWithBodies(this.app, this.settings);
+      this._updateStatusBar();
+
+      // Update dashboard views
+      const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_DASHBOARD);
+      for (const leaf of leaves) {
+        if (leaf.view instanceof IsHistoryDashboardView) {
+          leaf.view.requestRender();
+        }
+      }
+
+      const stats = this.cache.getStats(this.settings);
+      new Notice(`SEO scores refreshed! Average: ${stats.avgSeoScore}/100`);
+    } catch (e) {
+      new Notice(`SEO refresh failed: ${(e as Error).message}`);
     }
   }
 }

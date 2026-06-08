@@ -7,7 +7,7 @@
  */
 
 import { TFile } from "obsidian";
-import type { SEOScoreResult } from "./seo";
+import type { SEOScoreResult, SEOCheck } from "./seo";
 
 // ─── Track System (now fully dynamic) ───
 
@@ -121,6 +121,8 @@ export interface ContentItem {
   seoScore: number | null;
   /** v1.7.0: Whether content is stale */
   isStale: boolean;
+  /** v1.8.0: SEO check breakdown */
+  seoChecks: SEOCheck[];
 }
 
 // ─── Cache Stats ───
@@ -148,7 +150,7 @@ export interface CacheStats {
 
 // ─── Settings ───
 
-export const SETTINGS_VERSION = 9;
+export const SETTINGS_VERSION = 10;
 
 export interface IsHistorySettings {
   _version: number;
@@ -203,6 +205,14 @@ export interface IsHistorySettings {
   seoDescOptimalMax: number;
   seoMinWordCount: number;
   seoMinTags: number;
+
+  // ─── v1.8.0: Content Templates per Track ───
+  /** Per-track template overrides. Key = track code, value = template fields */
+  trackTemplates: Record<string, TrackTemplate>;
+
+  // ─── v1.8.0: Content Health Report ───
+  /** Path where health reports are saved */
+  reportPath: string;
 }
 
 export const DEFAULT_SETTINGS: IsHistorySettings = {
@@ -256,7 +266,33 @@ export const DEFAULT_SETTINGS: IsHistorySettings = {
   seoDescOptimalMax: 160,
   seoMinWordCount: 300,
   seoMinTags: 2,
+
+  // v1.8.0: Content Templates per Track
+  trackTemplates: {},
+
+  // v1.8.0: Content Health Report
+  reportPath: "isHistory-Report.md",
 };
+
+// ─── v1.8.0: Track Template ───
+
+/** Per-track template override for new post creation */
+export interface TrackTemplate {
+  /** Override slug format for this track */
+  slug?: string;
+  /** Override title format for this track */
+  title?: string;
+  /** Override image path for this track */
+  image?: string;
+  /** Override default series for this track */
+  series?: string;
+  /** Override default status for this track */
+  status?: string;
+  /** Override body template for this track */
+  body?: string;
+  /** Extra frontmatter fields to include (key: value pairs, values are strings) */
+  extraFrontmatter?: Record<string, string>;
+}
 
 // ─── Frontmatter Schemas ───
 

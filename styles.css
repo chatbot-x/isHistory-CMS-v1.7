@@ -500,3 +500,162 @@
     font-weight: 500;
     text-align: center;
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   v1.8.0 — Bulk Operations, SEO Breakdown, Health Report, Track Templates
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Bulk Select Mode ─── */
+.cms-bulk-checkbox {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    accent-color: var(--ish-track-a, #7c3aed);
+    z-index: 1;
+}
+
+.cms-card.cms-card-selected {
+    border-color: var(--ish-track-a, #7c3aed);
+    box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.25);
+}
+
+.cms-btn-bulk-active {
+    background: var(--ish-track-a, #7c3aed);
+    color: #fff;
+    border-color: var(--ish-track-a, #7c3aed);
+}
+
+/* ─── Bulk Action Bar ─── */
+.cms-bulk-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-basis: 100%;
+    padding: 8px 12px;
+    background: rgba(124, 58, 237, 0.06);
+    border-radius: 8px;
+    border: 1px solid rgba(124, 58, 237, 0.15);
+}
+
+.cms-bulk-count {
+    font-size: 0.85em;
+    font-weight: 600;
+    color: var(--ish-track-a, #7c3aed);
+    margin-right: 4px;
+}
+
+/* ─── SEO Check Breakdown (Sidebar) ─── */
+.cms-seo-checks {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.cms-seo-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.78em;
+    flex-wrap: wrap;
+}
+
+.cms-seo-check-passed {
+    background: rgba(16, 185, 129, 0.06);
+    color: var(--text-muted);
+}
+
+.cms-seo-check-failed {
+    background: rgba(239, 68, 68, 0.06);
+    color: var(--text-muted);
+}
+
+.cms-seo-check-icon {
+    font-weight: 700;
+    font-size: 0.9em;
+    flex-shrink: 0;
+}
+
+.cms-seo-check-passed .cms-seo-check-icon { color: #10b981; }
+.cms-seo-check-failed .cms-seo-check-icon { color: #ef4444; }
+
+.cms-seo-check-label {
+    flex: 1;
+    min-width: 0;
+}
+
+.cms-seo-check-points {
+    font-family: var(--font-monospace);
+    font-size: 0.88em;
+    color: var(--text-faint);
+    flex-shrink: 0;
+}
+
+.cms-seo-check-hint {
+    width: 100%;
+    margin-left: 22px;
+    font-size: 0.88em;
+    color: var(--text-faint);
+    font-style: italic;
+    line-height: 1.3;
+}
+
+/* ─── Track Template Editor (Settings) ─── */
+.cms-track-tpl-section {
+    margin: 8px 0;
+    padding: 12px 16px;
+    background: var(--background-secondary);
+    border-radius: 8px;
+    border: 1px solid var(--background-modifier-border);
+}
+
+.cms-track-tpl-heading {
+    font-size: 0.9em;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin: 0 0 8px 0;
+}
+
+.cms-track-tpl-empty {
+    font-size: 0.82em;
+    color: var(--text-faint);
+    font-style: italic;
+}
+
+.cms-track-tpl-field {
+    margin-bottom: 8px;
+}
+
+.cms-track-tpl-field label {
+    display: block;
+    font-size: 0.82em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.cms-track-tpl-field input,
+.cms-track-tpl-field textarea {
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 0.85em;
+    font-family: var(--font-monospace);
+}
+
+.cms-track-tpl-field textarea {
+    min-height: 60px;
+    resize: vertical;
+}
+
+/* ─── Health Report Stats ─── */
+.cms-stat-health .cms-stat-value { color: #10b981; }
+.cms-stat-health-poor .cms-stat-value { color: #ef4444; }
+.cms-stat-health-fair .cms-stat-value { color: #f59e0b; }

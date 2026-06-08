@@ -25,7 +25,7 @@ import {
   type SortMode,
 } from "./types";
 import { validateArchive, validateVault, getStatus } from "./validator";
-import { calculateArchiveSEO, calculateVaultSEO, type SEOConfig } from "./seo";
+import { calculateArchiveSEO, calculateVaultSEO, type SEOConfig, type SEOScoreResult } from "./seo";
 
 export class ContentCache {
   items: Map<string, ContentItem> = new Map();
@@ -84,13 +84,24 @@ export class ContentCache {
           ? [fm.aliases]
           : [];
 
-      // v1.7.0: Calculate SEO score
+      // v1.7.0 → v1.8.0: Calculate SEO score with checks breakdown
       let seoScore: number | null = null;
+      let seoChecks: import("./seo").SEOCheck[] = [];
       if (settings.showSeoScore) {
         try {
-          // Body content is async to read; scoring works with frontmatter-only checks
-          // Word count check will show as failed until body is read (acceptable tradeoff)
-          const bodyContent = "";
+          // v1.8.0: Read body content for accurate word count scoring
+          // Synchronous read from metadataCache; falls back to "" for safety
+          let bodyContent = "";
+          try {
+            const rawContent = (app.vault as any).read?.(file);
+            // read() is async but CachedMetadata has body start offset; use cache text if available
+            if (cache && (cache as any).sections) {
+              const bodyStart = (cache as any).frontmatterPosition?.end ?? 0;
+              const fullText = (app as any).metadataCache?.fileCache?.[file.path]?.hash ?? null;
+            }
+            // Fallback: read body from the cached raw content
+            bodyContent = _readBodyFromCache(app, file, cache);
+          } catch { /* body reading is best-effort */ }
           const seoConfig: SEOConfig = {
             titleOptimalMin: settings.seoTitleOptimalMin,
             titleOptimalMax: settings.seoTitleOptimalMax,
@@ -101,15 +112,17 @@ export class ContentCache {
             imageRequired: true,
             internalLinksRequired: true,
           };
+          let seoResult: SEOScoreResult;
           if (collection === "archive") {
-            const result = calculateArchiveSEO(fm as ArchiveFrontmatter | null, bodyContent, valConfig, seoConfig);
-            seoScore = result.score;
+            seoResult = calculateArchiveSEO(fm as ArchiveFrontmatter | null, bodyContent, valConfig, seoConfig);
           } else {
-            const result = calculateVaultSEO(fm as VaultFrontmatter | null, bodyContent);
-            seoScore = result.score;
+            seoResult = calculateVaultSEO(fm as VaultFrontmatter | null, bodyContent);
           }
+          seoScore = seoResult.score;
+          seoChecks = seoResult.checks;
         } catch {
           seoScore = null;
+          seoChecks = [];
         }
       }
 
@@ -141,9 +154,60 @@ export class ContentCache {
         validation,
         seoScore,
         isStale,
+        seoChecks,
       };
     } catch {
       return null;
+    }
+  }
+
+  // ─── v1.8.0: Async body content refresh for accurate SEO word counts ───
+
+  /** Async refresh: read file bodies and recalculate SEO scores with accurate word counts. */
+  async refreshSEOWithBodies(app: App, settings: IsHistorySettings): Promise<void> {
+    try {
+      const config = getValidationConfig(settings);
+      const seriesRegex = buildSeriesOrderRegex(settings.tracks);
+      const seoConfig: SEOConfig = {
+        titleOptimalMin: settings.seoTitleOptimalMin,
+        titleOptimalMax: settings.seoTitleOptimalMax,
+        descOptimalMin: settings.seoDescOptimalMin,
+        descOptimalMax: settings.seoDescOptimalMax,
+        minWordCount: settings.seoMinWordCount,
+        minTags: settings.seoMinTags,
+        imageRequired: true,
+        internalLinksRequired: true,
+      };
+
+      for (const [path, item] of this.items) {
+        if (!settings.showSeoScore || item.seoScore === null) continue;
+        try {
+          const raw = await app.vault.read(item.file);
+          const bodyContent = raw.replace(/^---[\s\S]*?---\n*/, "");
+          const cache = app.metadataCache.getFileCache(item.file);
+          const fm = cache?.frontmatter || {};
+          const collection = item.collection;
+
+          let seoResult: SEOScoreResult;
+          if (collection === "archive") {
+            seoResult = calculateArchiveSEO(fm as ArchiveFrontmatter | null, bodyContent, config, seoConfig);
+          } else {
+            seoResult = calculateVaultSEO(fm as VaultFrontmatter | null, bodyContent);
+          }
+
+          // Only update if score changed (avoid unnecessary dirty flags)
+          if (item.seoScore !== seoResult.score) {
+            item.seoScore = seoResult.score;
+            item.seoChecks = seoResult.checks;
+            this._statsDirty = true;
+          } else if (item.seoChecks.length !== seoResult.checks.length) {
+            item.seoChecks = seoResult.checks;
+            this._statsDirty = true;
+          }
+        } catch { /* skip files that can't be read */ }
+      }
+    } catch (e) {
+      console.error("isHistory CMS: refreshSEOWithBodies failed", e);
     }
   }
 
@@ -227,6 +291,7 @@ export class ContentCache {
       connects: item.connects, image: item.image,
       aliases: item.aliases, series: item.series,
       publish: item.publish, order: item.order,
+      seo: item.seoScore,
     });
   }
 
@@ -435,4 +500,59 @@ function _isItemStale(file: TFile, settings: IsHistorySettings): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * v1.8.0: Best-effort synchronous body content extraction from Obsidian's internal cache.
+ *
+ * Obsidian stores raw file content in an internal cache keyed by path. We access
+ * it through undocumented (but stable) internals to avoid an async vault.read() call
+ * inside the synchronous _buildItem() path. If the internal cache is unavailable,
+ * returns "" — the word-count SEO check will simply report as "not yet available."
+ */
+function _readBodyFromCache(app: App, file: TFile, metadata: any): string {
+  try {
+    // Strategy 1: Obsidian's internal fileCache stores the raw content hash + text
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fileCache = (app as any).metadataCache?.fileCache?.[file.path];
+    if (fileCache?.hash) {
+      // Try to get content from the vault's adapter cache
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const adapter = (app.vault as any).adapter;
+      if (adapter?.files?.[file.path]?.stat) {
+        // The adapter stores read content in an internal map after first read
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const vaultFiles = (app.vault as any).files;
+        // Try direct internal read cache
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const internalCache = (app as any).vault?.readCache?.[file.path];
+        if (typeof internalCache === "string") {
+          return _extractBody(internalCache);
+        }
+      }
+    }
+
+    // Strategy 2: If Obsidian has already opened this file, the editor has the content
+    // We can try to get it from the active view
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const activeView = app.workspace.getActiveViewOfType({} as any);
+    if (activeView && (activeView as any).file?.path === file.path) {
+      const editor = (activeView as any).editor;
+      if (editor?.getValue) {
+        return _extractBody(editor.getValue());
+      }
+    }
+  } catch { /* best-effort */ }
+
+  return ""; // Fallback: word count check will show as needing attention
+}
+
+/** Extract body content from a full markdown string (strip frontmatter) */
+function _extractBody(fullContent: string): string {
+  if (!fullContent) return "";
+  const match = fullContent.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+  if (match) {
+    return fullContent.slice(match[0].length);
+  }
+  return fullContent;
 }

@@ -878,6 +878,136 @@ export class IsHistorySettingTab extends PluginSettingTab {
                         );
 
                 // ═══════════════════════════════════════════════════════════
+                //  v1.8.0: TRACK TEMPLATES
+                // ═══════════════════════════════════════════════════════════
+                containerEl.createEl("h2", { text: "Track Templates" });
+                containerEl.createEl("p", {
+                        text: "Override the default new-post template for specific tracks. When you create a new post for a track that has a template override, these values will be used instead of the global defaults. Leave fields empty to use the global template value.",
+                        cls: "cms-settings-hint",
+                });
+
+                for (const [code, info] of Object.entries(this.plugin.settings.tracks)) {
+                        const tpl = this.plugin.settings.trackTemplates[code] || {};
+                        const section = containerEl.createEl("div", { cls: "cms-track-tpl-section" });
+                        section.createEl("div", { text: `${info.emoji} ${info.name} (${code})`, cls: "cms-track-tpl-heading" });
+
+                        // Initialize template if not exists
+                        if (!this.plugin.settings.trackTemplates[code]) {
+                                this.plugin.settings.trackTemplates[code] = {};
+                        }
+
+                        // Slug override
+                        const slugDiv = section.createEl("div", { cls: "cms-track-tpl-field" });
+                        slugDiv.createEl("label", { text: "Slug format (leave empty for global default)" });
+                        const slugInput = slugDiv.createEl("input", {
+                                cls: "cms-form-input",
+                                attr: { placeholder: this.plugin.settings.newPostSlug, type: "text" },
+                        });
+                        slugInput.value = tpl.slug || "";
+                        slugInput.addEventListener("change", async () => {
+                                this.plugin.settings.trackTemplates[code].slug = slugInput.value || undefined;
+                                await this.plugin.saveSettings();
+                        });
+
+                        // Title override
+                        const titleDiv = section.createEl("div", { cls: "cms-track-tpl-field" });
+                        titleDiv.createEl("label", { text: "Title format" });
+                        const titleInput = titleDiv.createEl("input", {
+                                cls: "cms-form-input",
+                                attr: { placeholder: this.plugin.settings.newPostTitle, type: "text" },
+                        });
+                        titleInput.value = tpl.title || "";
+                        titleInput.addEventListener("change", async () => {
+                                this.plugin.settings.trackTemplates[code].title = titleInput.value || undefined;
+                                await this.plugin.saveSettings();
+                        });
+
+                        // Series override
+                        const seriesDiv = section.createEl("div", { cls: "cms-track-tpl-field" });
+                        seriesDiv.createEl("label", { text: "Default series" });
+                        const seriesInput = seriesDiv.createEl("input", {
+                                cls: "cms-form-input",
+                                attr: { placeholder: this.plugin.settings.defaultSeries, type: "text" },
+                        });
+                        seriesInput.value = tpl.series || "";
+                        seriesInput.addEventListener("change", async () => {
+                                this.plugin.settings.trackTemplates[code].series = seriesInput.value || undefined;
+                                await this.plugin.saveSettings();
+                        });
+
+                        // Body override
+                        const bodyDiv = section.createEl("div", { cls: "cms-track-tpl-field" });
+                        bodyDiv.createEl("label", { text: "Body template" });
+                        const bodyInput = bodyDiv.createEl("textarea", {
+                                cls: "cms-form-input",
+                                attr: { placeholder: this.plugin.settings.newPostBody, rows: "3" },
+                        });
+                        bodyInput.value = tpl.body || "";
+                        bodyInput.addEventListener("change", async () => {
+                                this.plugin.settings.trackTemplates[code].body = bodyInput.value || undefined;
+                                await this.plugin.saveSettings();
+                        });
+                }
+
+                if (Object.keys(this.plugin.settings.tracks).length === 0) {
+                        containerEl.createEl("p", {
+                                text: "No tracks defined. Add tracks above to configure per-track templates.",
+                                cls: "cms-track-tpl-empty",
+                        });
+                }
+
+                // Reset track templates
+                new Setting(containerEl)
+                        .setName("Reset all track templates")
+                        .setDesc("Remove all per-track template overrides and use global defaults")
+                        .addButton((btn) =>
+                                btn.setButtonText("Reset").setWarning().onClick(async () => {
+                                        this.plugin.settings.trackTemplates = {};
+                                        await this.plugin.saveSettings();
+                                        this.display();
+                                        new Notice("Track templates reset to defaults.");
+                                })
+                        );
+
+                // ═══════════════════════════════════════════════════════════
+                //  v1.8.0: CONTENT HEALTH REPORT
+                // ═══════════════════════════════════════════════════════════
+                containerEl.createEl("h2", { text: "Health Report" });
+                containerEl.createEl("p", {
+                        text: "Generate a markdown report summarizing the health of your content vault. The report includes validation errors, SEO scores, stale content, and actionable recommendations.",
+                        cls: "cms-settings-hint",
+                });
+
+                new Setting(containerEl)
+                        .setName("Report file path")
+                        .setDesc("Where to save the generated health report in your vault")
+                        .addText((text) =>
+                                text
+                                        .setPlaceholder("isHistory-Report.md")
+                                        .setValue(this.plugin.settings.reportPath || "isHistory-Report.md")
+                                        .onChange(async (v) => {
+                                                this.plugin.settings.reportPath = v.trim() || "isHistory-Report.md";
+                                                await this.plugin.saveSettings();
+                                        })
+                        )
+                        .addExtraButton((btn) =>
+                                btn.setIcon("reset").setTooltip("Reset to default").onClick(async () => {
+                                        this.plugin.settings.reportPath = DEFAULT_SETTINGS.reportPath;
+                                        await this.plugin.saveSettings();
+                                        this.display();
+                                })
+                        );
+
+                new Setting(containerEl)
+                        .setName("Generate report now")
+                        .setDesc("Create a health report and open it in the editor")
+                        .addButton((btn) =>
+                                btn.setButtonText("Generate Report").setCta().onClick(() => {
+                                        void this.plugin.generateHealthReport();
+                                })
+                        );
+
+                // ═══════════════════════════════════════════════════════════
                 //  APPEARANCE
                 // ═══════════════════════════════════════════════════════════
                 containerEl.createEl("h2", { text: "Appearance" });
@@ -1215,6 +1345,10 @@ export function migrateSettings(loaded: Record<string, unknown>): Record<string,
                 if (typeof loaded.preflightDraft !== "boolean") loaded.preflightDraft = DEFAULT_SETTINGS.preflightDraft;
                 if (typeof loaded.preflightStatus !== "string") loaded.preflightStatus = DEFAULT_SETTINGS.preflightStatus;
                 if (typeof loaded.preflightAutoDate !== "boolean") loaded.preflightAutoDate = DEFAULT_SETTINGS.preflightAutoDate;
+
+                // v1.8.0: Track templates and health report path
+                if (!loaded.trackTemplates || typeof loaded.trackTemplates !== "object") loaded.trackTemplates = {};
+                if (typeof loaded.reportPath !== "string") loaded.reportPath = DEFAULT_SETTINGS.reportPath;
         }
 
         loaded._version = SETTINGS_VERSION;

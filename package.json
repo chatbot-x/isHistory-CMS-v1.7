@@ -1,6 +1,6 @@
 {
   "name": "astro-cms-obsidian-plugin",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "CMS for Astro sites to manage file collections with live frontmatter schema validation and automated publishing workflows.",
   "main": "main.js",
   "scripts": {
