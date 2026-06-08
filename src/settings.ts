@@ -722,6 +722,162 @@ export class IsHistorySettingTab extends PluginSettingTab {
                         );
 
                 // ═══════════════════════════════════════════════════════════
+                //  v1.7.0: SEO SCORE CARD
+                // ═══════════════════════════════════════════════════════════
+                containerEl.createEl("h2", { text: "SEO Score Card" });
+                containerEl.createEl("p", {
+                        text: "The SEO score (0-100) rates your content's search engine optimization potential based on title length, description quality, tags, images, internal links, and more. Scores appear on dashboard cards and in the sidebar.",
+                        cls: "cms-settings-hint",
+                });
+
+                new Setting(containerEl)
+                        .setName("Show SEO scores")
+                        .setDesc("Display SEO scores on dashboard cards, in the sidebar, and in stats")
+                        .addToggle((toggle) =>
+                                toggle.setValue(this.plugin.settings.showSeoScore).onChange(async (v) => {
+                                        this.plugin.settings.showSeoScore = v;
+                                        await this.plugin.saveSettings();
+                                        this._debouncedRescan();
+                                        this.display();
+                                })
+                        );
+
+                if (this.plugin.settings.showSeoScore) {
+                        this._addNumberInput(containerEl, {
+                                name: "Optimal title min length",
+                                desc: "Titles at least this long are considered optimal for Google SERP display.",
+                                value: this.plugin.settings.seoTitleOptimalMin,
+                                unit: "chars",
+                                min: 20,
+                                max: 80,
+                                step: 5,
+                                defaultValue: DEFAULT_SETTINGS.seoTitleOptimalMin,
+                                onChange: (v) => { this.plugin.settings.seoTitleOptimalMin = v; },
+                        });
+
+                        this._addNumberInput(containerEl, {
+                                name: "Optimal title max length",
+                                desc: "Titles up to this length are considered optimal. Google truncates titles around 60 characters.",
+                                value: this.plugin.settings.seoTitleOptimalMax,
+                                unit: "chars",
+                                min: 40,
+                                max: 100,
+                                step: 5,
+                                defaultValue: DEFAULT_SETTINGS.seoTitleOptimalMax,
+                                onChange: (v) => { this.plugin.settings.seoTitleOptimalMax = v; },
+                        });
+
+                        this._addNumberInput(containerEl, {
+                                name: "Optimal description min length",
+                                desc: "Descriptions at least this long are considered optimal for meta description display.",
+                                value: this.plugin.settings.seoDescOptimalMin,
+                                unit: "chars",
+                                min: 50,
+                                max: 200,
+                                step: 5,
+                                defaultValue: DEFAULT_SETTINGS.seoDescOptimalMin,
+                                onChange: (v) => { this.plugin.settings.seoDescOptimalMin = v; },
+                        });
+
+                        this._addNumberInput(containerEl, {
+                                name: "Optimal description max length",
+                                desc: "Descriptions up to this length are considered optimal. Google shows about 155-160 characters.",
+                                value: this.plugin.settings.seoDescOptimalMax,
+                                unit: "chars",
+                                min: 100,
+                                max: 300,
+                                step: 5,
+                                defaultValue: DEFAULT_SETTINGS.seoDescOptimalMax,
+                                onChange: (v) => { this.plugin.settings.seoDescOptimalMax = v; },
+                        });
+
+                        this._addNumberInput(containerEl, {
+                                name: "Minimum word count",
+                                desc: "Posts with at least this many words score higher. Thin content ranks poorly in search engines.",
+                                value: this.plugin.settings.seoMinWordCount,
+                                unit: "words",
+                                min: 50,
+                                max: 2000,
+                                step: 50,
+                                defaultValue: DEFAULT_SETTINGS.seoMinWordCount,
+                                onChange: (v) => { this.plugin.settings.seoMinWordCount = v; },
+                        });
+
+                        this._addNumberInput(containerEl, {
+                                name: "Minimum tags for SEO",
+                                desc: "Posts with at least this many tags score higher for discoverability.",
+                                value: this.plugin.settings.seoMinTags,
+                                unit: "tags",
+                                min: 1,
+                                max: 10,
+                                step: 1,
+                                defaultValue: DEFAULT_SETTINGS.seoMinTags,
+                                onChange: (v) => { this.plugin.settings.seoMinTags = v; },
+                        });
+
+                        new Setting(containerEl)
+                                .setName("Reset SEO settings to default")
+                                .addButton((btn) =>
+                                        btn.setButtonText("Reset").setWarning().onClick(async () => {
+                                                this.plugin.settings.seoTitleOptimalMin = DEFAULT_SETTINGS.seoTitleOptimalMin;
+                                                this.plugin.settings.seoTitleOptimalMax = DEFAULT_SETTINGS.seoTitleOptimalMax;
+                                                this.plugin.settings.seoDescOptimalMin = DEFAULT_SETTINGS.seoDescOptimalMin;
+                                                this.plugin.settings.seoDescOptimalMax = DEFAULT_SETTINGS.seoDescOptimalMax;
+                                                this.plugin.settings.seoMinWordCount = DEFAULT_SETTINGS.seoMinWordCount;
+                                                this.plugin.settings.seoMinTags = DEFAULT_SETTINGS.seoMinTags;
+                                                await this.plugin.saveSettings();
+                                                this._debouncedRescan();
+                                                this.display();
+                                        })
+                                );
+                }
+
+                // ═══════════════════════════════════════════════════════════
+                //  v1.7.0: STALE CONTENT ALERTS
+                // ═══════════════════════════════════════════════════════════
+                containerEl.createEl("h2", { text: "Stale Content Alerts" });
+                containerEl.createEl("p", {
+                        text: "Stale content is draft or published content that hasn't been modified in a while. The plugin highlights stale posts with a \"STALE\" badge so you can review and update them before they hurt your site's SEO.",
+                        cls: "cms-settings-hint",
+                });
+
+                new Setting(containerEl)
+                        .setName("Show stale badges")
+                        .setDesc("Display a \"STALE\" badge on dashboard cards and a warning in the sidebar for content that hasn't been modified recently")
+                        .addToggle((toggle) =>
+                                toggle.setValue(this.plugin.settings.showStaleBadge).onChange(async (v) => {
+                                        this.plugin.settings.showStaleBadge = v;
+                                        await this.plugin.saveSettings();
+                                        this._debouncedRescan();
+                                        this.display();
+                                })
+                        );
+
+                this._addNumberInput(containerEl, {
+                        name: "Stale threshold",
+                        desc: "Content not modified within this many days will be flagged as stale.",
+                        value: this.plugin.settings.staleThresholdDays,
+                        unit: "days",
+                        min: 7,
+                        max: 365,
+                        step: 7,
+                        defaultValue: DEFAULT_SETTINGS.staleThresholdDays,
+                        onChange: (v) => { this.plugin.settings.staleThresholdDays = v; },
+                });
+
+                new Setting(containerEl)
+                        .setName("Reset stale settings to default")
+                        .addButton((btn) =>
+                                btn.setButtonText("Reset").setWarning().onClick(async () => {
+                                        this.plugin.settings.staleThresholdDays = DEFAULT_SETTINGS.staleThresholdDays;
+                                        this.plugin.settings.showStaleBadge = DEFAULT_SETTINGS.showStaleBadge;
+                                        await this.plugin.saveSettings();
+                                        this._debouncedRescan();
+                                        this.display();
+                                })
+                        );
+
+                // ═══════════════════════════════════════════════════════════
                 //  APPEARANCE
                 // ═══════════════════════════════════════════════════════════
                 containerEl.createEl("h2", { text: "Appearance" });

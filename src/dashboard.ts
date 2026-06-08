@@ -24,6 +24,7 @@ const SORT_OPTIONS: { value: SortMode; label: string }[] = [
   { value: "titleAZ", label: "Title A-Z" },
   { value: "errorsFirst", label: "Errors First" },
   { value: "draftsFirst", label: "Drafts First" },
+  { value: "seoScore", label: "SEO Score (Low First)" },
 ];
 
 export class IsHistoryDashboardView extends ItemView {
@@ -317,7 +318,7 @@ export class IsHistoryDashboardView extends ItemView {
     }
   }
 
-  /** Build filter list dynamically from tracks and statuses, plus "recent" */
+  /** Build filter list dynamically from tracks and statuses, plus "recent" and v1.7.0 filters */
   private _buildFilterList(): { key: string; label: string }[] {
     const settings = this.plugin.settings;
     const filters: { key: string; label: string }[] = [
@@ -331,7 +332,13 @@ export class IsHistoryDashboardView extends ItemView {
     filters.push({ key: "drafts", label: "Drafts" });
     // Feature 8: Recently modified filter
     filters.push({ key: "recent", label: "Recent" });
+    // v1.7.0: Stale content filter
+    filters.push({ key: "stale", label: "Stale" });
     filters.push({ key: "errors", label: "Errors" });
+    // v1.7.0: Low SEO filter
+    if (settings.showSeoScore) {
+      filters.push({ key: "lowSeo", label: "Low SEO" });
+    }
     return filters;
   }
 
@@ -386,11 +393,18 @@ export class IsHistoryDashboardView extends ItemView {
       for (const [code, info] of Object.entries(settings.tracks)) {
         cards.push({ label: `${code} ${info.name}`, value: s.trackCounts[code] || 0, cls: `cms-stat-track-${code.toLowerCase()}` });
       }
-      cards.push(
-        { label: "Drafts", value: s.drafts, cls: "cms-stat-warning" },
-        { label: "Errors", value: s.errors, cls: "cms-stat-error" },
-        { label: "Ready", value: s.ready, cls: "cms-stat-success" },
-      );
+    // v1.7.0: SEO & Stale stats
+    if (settings.showSeoScore) {
+      cards.push({ label: "Avg SEO", value: s.avgSeoScore, cls: "cms-stat-seo" });
+    }
+    if (settings.showStaleBadge && s.stale > 0) {
+      cards.push({ label: "Stale", value: s.stale, cls: "cms-stat-stale" });
+    }
+    cards.push(
+      { label: "Drafts", value: s.drafts, cls: "cms-stat-warning" },
+      { label: "Errors", value: s.errors, cls: "cms-stat-error" },
+      { label: "Ready", value: s.ready, cls: "cms-stat-success" },
+    );
       for (const c of cards) {
         const el = this._statsEl.createEl("div", { cls: `cms-stat-card ${c.cls}` });
         el.createEl("div", { text: String(c.value), cls: "cms-stat-value" });
@@ -437,6 +451,24 @@ export class IsHistoryDashboardView extends ItemView {
       text: item.validation.label,
       cls: `cms-badge cms-badge-${item.validation.status === "ready" ? "success" : item.validation.status === "error" ? "error" : "warning"}`,
     });
+
+    // v1.7.0: SEO Score badge
+    if (settings.showSeoScore && item.seoScore !== null) {
+      const seoColor = item.seoScore >= 90 ? "#10b981" : item.seoScore >= 75 ? "#3b82f6" : item.seoScore >= 55 ? "#f59e0b" : item.seoScore >= 35 ? "#f97316" : "#ef4444";
+      badgeArea.createEl("span", {
+        text: `SEO ${item.seoScore}`,
+        cls: "cms-badge cms-badge-seo",
+        attr: { style: `background-color: ${seoColor}20; color: ${seoColor}` },
+      });
+    }
+
+    // v1.7.0: Stale badge
+    if (settings.showStaleBadge && item.isStale) {
+      badgeArea.createEl("span", {
+        text: "STALE",
+        cls: "cms-badge cms-badge-stale",
+      });
+    }
 
     // Body
     const cardBody = card.createEl("div", { cls: "cms-card-body" });

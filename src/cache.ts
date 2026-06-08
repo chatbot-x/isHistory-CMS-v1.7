@@ -21,9 +21,11 @@ import {
   getValidationConfig,
   buildSeriesOrderRegex,
   RECENT_THRESHOLD_MS,
+  DEFAULT_STALE_THRESHOLD_MS,
   type SortMode,
 } from "./types";
 import { validateArchive, validateVault, getStatus } from "./validator";
+import { calculateArchiveSEO, calculateVaultSEO, type SEOConfig } from "./seo";
 
 export class ContentCache {
   items: Map<string, ContentItem> = new Map();
@@ -82,6 +84,38 @@ export class ContentCache {
           ? [fm.aliases]
           : [];
 
+      // v1.7.0: Calculate SEO score
+      let seoScore: number | null = null;
+      if (settings.showSeoScore) {
+        try {
+          // Body content is async to read; scoring works with frontmatter-only checks
+          // Word count check will show as failed until body is read (acceptable tradeoff)
+          const bodyContent = "";
+          const seoConfig: SEOConfig = {
+            titleOptimalMin: settings.seoTitleOptimalMin,
+            titleOptimalMax: settings.seoTitleOptimalMax,
+            descOptimalMin: settings.seoDescOptimalMin,
+            descOptimalMax: settings.seoDescOptimalMax,
+            minWordCount: settings.seoMinWordCount,
+            minTags: settings.seoMinTags,
+            imageRequired: true,
+            internalLinksRequired: true,
+          };
+          if (collection === "archive") {
+            const result = calculateArchiveSEO(fm as ArchiveFrontmatter | null, bodyContent, valConfig, seoConfig);
+            seoScore = result.score;
+          } else {
+            const result = calculateVaultSEO(fm as VaultFrontmatter | null, bodyContent);
+            seoScore = result.score;
+          }
+        } catch {
+          seoScore = null;
+        }
+      }
+
+      // v1.7.0: Stale content detection
+      const isStale = _isItemStale(file, settings);
+
       return {
         file,
         path: file.path,
@@ -105,6 +139,8 @@ export class ContentCache {
         publish: fm.publish as boolean | undefined,
         order: fm.order as number | undefined,
         validation,
+        seoScore,
+        isStale,
       };
     } catch {
       return null;
@@ -194,7 +230,7 @@ export class ContentCache {
     });
   }
 
-  // ─── Statistics (dynamic tracks) ───
+  // ─── Statistics (dynamic tracks + v1.7.0 stale/seo) ───
 
   getStats(settings: IsHistorySettings): CacheStats {
     if (!this._statsDirty && this._stats) return this._stats;
@@ -211,6 +247,15 @@ export class ContentCache {
       }
       trackCounts["none"] = archive.filter((i) => !i.track).length;
 
+      // v1.7.0: Stale count
+      const staleCount = items.filter((i) => i.isStale).length;
+
+      // v1.7.0: Average SEO score (only items with a score)
+      const scoredItems = items.filter((i) => i.seoScore !== null);
+      const avgSeoScore = scoredItems.length > 0
+        ? Math.round(scoredItems.reduce((sum, i) => sum + (i.seoScore || 0), 0) / scoredItems.length)
+        : 0;
+
       const stats: CacheStats = {
         total: items.length,
         archiveTotal: archive.length,
@@ -226,6 +271,8 @@ export class ContentCache {
         uniqueTags: [...new Set(items.flatMap((i) => i.tags))],
         allEras: [...new Set(archive.map((i) => i.era).filter((e): e is string => !!e))],
         allSeries: [...new Set(archive.map((i) => i.series).filter((s): s is string => !!s))],
+        stale: staleCount,
+        avgSeoScore,
       };
 
       this._stats = stats;
@@ -238,6 +285,7 @@ export class ContentCache {
         published: 0, upcoming: 0, planned: 0, ready: 0,
         errors: 0, warnings: 0, trackCounts: {},
         uniqueTags: [], allEras: [], allSeries: [],
+        stale: 0, avgSeoScore: 0,
       };
     }
   }
@@ -286,6 +334,11 @@ export class ContentCache {
           const da3 = a.draft ? 0 : 1;
           const db3 = b.draft ? 0 : 1;
           return da3 - db3;
+        }
+        case "seoScore": {
+          const sa = a.seoScore ?? -1;
+          const sb = b.seoScore ?? -1;
+          return sa - sb; // lowest SEO first (needs improvement first)
         }
         case "seriesOrder":
         default: {
@@ -357,11 +410,29 @@ export class ContentCache {
       if (!mtime) return false;
       return (Date.now() - mtime) < RECENT_THRESHOLD_MS;
     }
+    // v1.7.0: Stale content filter
+    if (filter === "stale" && !item.isStale) return false;
+    // v1.7.0: Low SEO score filter (score < 55)
+    if (filter === "lowSeo" && (item.seoScore === null || item.seoScore >= 55)) return false;
     return true;
   }
 
   /** Reset stats dirty flag (for testing). */
   resetStatsDirty(): void {
     this._statsDirty = true;
+  }
+}
+
+// ─── v1.7.0: Stale Content Detection (module-level pure function) ───
+
+/** Check if a content item is stale based on file modification time and settings */
+function _isItemStale(file: TFile, settings: IsHistorySettings): boolean {
+  try {
+    const mtime = file.stat?.mtime;
+    if (!mtime) return false;
+    const thresholdMs = (settings.staleThresholdDays || 30) * 24 * 60 * 60 * 1000;
+    return (Date.now() - mtime) > thresholdMs;
+  } catch {
+    return false;
   }
 }

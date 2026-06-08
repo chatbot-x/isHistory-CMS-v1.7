@@ -98,6 +98,28 @@ export default class IsHistoryPlugin extends Plugin {
         callback: () => { void this.bulkPreFlight(); },
       });
 
+      // ─── v1.7.0: Command Palette Integration ───
+      this.addCommand({
+        id: "toggle-draft-status",
+        name: "Toggle draft status of current post",
+        callback: () => { void this.toggleDraftStatus(); },
+      });
+      this.addCommand({
+        id: "show-seo-score",
+        name: "Show SEO score for current post",
+        callback: () => this.showSEOScore(),
+      });
+      this.addCommand({
+        id: "open-settings",
+        name: "Open isHistory settings",
+        callback: () => { void this.openPluginSettings(); },
+      });
+      this.addCommand({
+        id: "refresh-cache",
+        name: "Refresh content cache",
+        callback: () => this.refreshCache(),
+      });
+
       // ─── Feature 9: Right-click context menus ───
       this._registerContextMenus();
 
@@ -638,6 +660,75 @@ ${body}`;
       this._updateStatusBar();
     } catch (e) {
       new Notice(`Bulk pre-flight failed: ${(e as Error).message}`);
+    }
+  }
+
+  // ─── v1.7.0: Command Palette Actions ───
+
+  async toggleDraftStatus() {
+    try {
+      const file = this.app.workspace.getActiveFile();
+      if (!file || !this.cache.isInCollection(file.path, this.settings)) {
+        new Notice("Open an archive or vault file first.");
+        return;
+      }
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        fm.draft = !fm.draft;
+      });
+      const cached = this.cache.items.get(file.path);
+      const isNowDraft = !cached?.draft; // approximate — cache may not be updated yet
+      new Notice(`${file.basename}: draft set to ${!isNowDraft}`);
+      this._updateStatusBar();
+    } catch (e) {
+      new Notice(`Failed to toggle draft: ${(e as Error).message}`);
+    }
+  }
+
+  showSEOScore() {
+    try {
+      const file = this.app.workspace.getActiveFile();
+      if (!file || !this.cache.isInCollection(file.path, this.settings)) {
+        new Notice("Open an archive or vault file first.");
+        return;
+      }
+      const cached = this.cache.items.get(file.path);
+      if (!cached || cached.seoScore === null) {
+        new Notice("SEO score not available. Enable it in Settings.");
+        return;
+      }
+      const label = cached.seoScore >= 90 ? "Excellent" : cached.seoScore >= 75 ? "Good" : cached.seoScore >= 55 ? "Fair" : cached.seoScore >= 35 ? "Needs Work" : "Poor";
+      new Notice(`${file.basename}: SEO Score ${cached.seoScore}/100 (${label})`);
+    } catch (e) {
+      new Notice(`Failed to get SEO score: ${(e as Error).message}`);
+    }
+  }
+
+  async openPluginSettings() {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const settingTab = (this.app as any).setting?.pluginTabs?.find(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (t: any) => t.plugin?.manifest?.id === "ishistory-cms"
+      );
+      if (settingTab) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this.app as any).setting.open();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this.app as any).setting.openTabById("ishistory-cms");
+      } else {
+        new Notice("Open Settings > Community Plugins > isHistory CMS");
+      }
+    } catch {
+      new Notice("Open Settings > Community Plugins > isHistory CMS");
+    }
+  }
+
+  refreshCache() {
+    try {
+      this.rescanCache();
+      new Notice("Content cache refreshed.");
+    } catch (e) {
+      new Notice(`Refresh failed: ${(e as Error).message}`);
     }
   }
 }

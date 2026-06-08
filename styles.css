@@ -432,3 +432,71 @@
 .cms-preflight-errors li {
     margin-bottom: 2px;
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   v1.7.0 — SEO Score Card, Stale Content Alerts, Command Palette
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ─── SEO Score Badge (Dashboard Cards) ─── */
+.cms-badge-seo {
+    font-family: var(--font-monospace);
+    font-size: 0.7em;
+    letter-spacing: 0.02em;
+}
+
+/* ─── Stale Badge (Dashboard Cards) ─── */
+.cms-badge-stale {
+    background-color: rgba(249, 115, 22, 0.15);
+    color: #f97316;
+    font-size: 0.7em;
+    letter-spacing: 0.05em;
+    animation: cms-stale-pulse 3s ease-in-out infinite;
+}
+@keyframes cms-stale-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+/* ─── SEO Score Stats Card ─── */
+.cms-stat-seo .cms-stat-value { color: #3b82f6; }
+
+/* ─── Stale Stats Card ─── */
+.cms-stat-stale .cms-stat-value { color: #f97316; }
+
+/* ─── Sidebar SEO Score Display ─── */
+.cms-seo-wrapper {
+    margin: 12px 0;
+    padding: 12px;
+    background: var(--background-secondary);
+    border-radius: 8px;
+    border: 1px solid var(--background-modifier-border);
+    text-align: center;
+}
+.cms-seo-score {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 4px;
+}
+.cms-seo-number {
+    font-size: 2em;
+    font-weight: 700;
+    font-family: var(--font-monospace);
+}
+.cms-seo-label {
+    font-size: 0.85em;
+    color: var(--text-muted);
+}
+
+/* ─── Sidebar Stale Warning ─── */
+.cms-stale-warning {
+    margin: 8px 0;
+    padding: 8px 12px;
+    background: rgba(249, 115, 22, 0.1);
+    border: 1px solid rgba(249, 115, 22, 0.25);
+    border-radius: 6px;
+    color: #f97316;
+    font-size: 0.82em;
+    font-weight: 500;
+    text-align: center;
+}

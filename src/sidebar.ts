@@ -7,6 +7,8 @@
 
 import { ItemView, type WorkspaceLeaf, Notice } from "obsidian";
 import { normalizePathSetting } from "./types";
+import { calculateArchiveSEO, calculateVaultSEO, type SEOConfig, getSEOLabel } from "./seo";
+import { getValidationConfig } from "./types";
 import IsHistoryPlugin from "./main";
 
 export const VIEW_TYPE_SIDEBAR = "ishistory-sidebar";
@@ -116,6 +118,25 @@ export class IsHistorySidebarView extends ItemView {
         });
       }
       fileInfo.createEl("span", { text: activeFile.path, cls: "cms-sidebar-file-title" });
+
+      // v1.7.0: SEO Score display
+      if (settings.showSeoScore && cached && cached.seoScore !== null) {
+        const seoResult = cached.seoScore;
+        const seoColor = seoResult >= 90 ? "#10b981" : seoResult >= 75 ? "#3b82f6" : seoResult >= 55 ? "#f59e0b" : seoResult >= 35 ? "#f97316" : "#ef4444";
+        const seoLabel = getSEOLabel(seoResult);
+        const seoWrapper = container.createEl("div", { cls: "cms-seo-wrapper" });
+        const scoreEl = seoWrapper.createEl("div", { cls: "cms-seo-score" });
+        scoreEl.createEl("span", { text: String(seoResult), cls: "cms-seo-number", attr: { style: `color: ${seoColor}` } });
+        scoreEl.createEl("span", { text: `/100 ${seoLabel}`, cls: "cms-seo-label" });
+      }
+
+      // v1.7.0: Stale indicator
+      if (settings.showStaleBadge && cached && cached.isStale) {
+        container.createEl("div", {
+          text: `Stale content — not modified in ${settings.staleThresholdDays}+ days`,
+          cls: "cms-stale-warning",
+        });
+      }
 
       const badgeMap: Record<string, { text: string; cls: string }> = {
         ready: { text: "Ready for Production", cls: "cms-badge-success" },

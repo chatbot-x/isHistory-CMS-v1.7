@@ -7,6 +7,7 @@
  */
 
 import { TFile } from "obsidian";
+import type { SEOScoreResult } from "./seo";
 
 // ─── Track System (now fully dynamic) ───
 
@@ -116,6 +117,10 @@ export interface ContentItem {
   publish: boolean | undefined;
   order: number | undefined;
   validation: ValidationResult;
+  /** v1.7.0: SEO score (0-100) */
+  seoScore: number | null;
+  /** v1.7.0: Whether content is stale */
+  isStale: boolean;
 }
 
 // ─── Cache Stats ───
@@ -135,11 +140,15 @@ export interface CacheStats {
   uniqueTags: string[];
   allEras: string[];
   allSeries: string[];
+  /** v1.7.0: Stale content count */
+  stale: number;
+  /** v1.7.0: Average SEO score across all items */
+  avgSeoScore: number;
 }
 
 // ─── Settings ───
 
-export const SETTINGS_VERSION = 8;
+export const SETTINGS_VERSION = 9;
 
 export interface IsHistorySettings {
   _version: number;
@@ -181,6 +190,19 @@ export interface IsHistorySettings {
   preflightDraft: boolean;
   preflightStatus: string;
   preflightAutoDate: boolean;
+
+  // ─── v1.7.0: Stale Content Alerts ───
+  staleThresholdDays: number;
+  showStaleBadge: boolean;
+
+  // ─── v1.7.0: SEO Score Card ───
+  showSeoScore: boolean;
+  seoTitleOptimalMin: number;
+  seoTitleOptimalMax: number;
+  seoDescOptimalMin: number;
+  seoDescOptimalMax: number;
+  seoMinWordCount: number;
+  seoMinTags: number;
 }
 
 export const DEFAULT_SETTINGS: IsHistorySettings = {
@@ -221,6 +243,19 @@ export const DEFAULT_SETTINGS: IsHistorySettings = {
   preflightDraft: false,
   preflightStatus: "published",
   preflightAutoDate: true,
+
+  // v1.7.0: Stale Content Alerts
+  staleThresholdDays: 30,
+  showStaleBadge: true,
+
+  // v1.7.0: SEO Score Card
+  showSeoScore: true,
+  seoTitleOptimalMin: 50,
+  seoTitleOptimalMax: 60,
+  seoDescOptimalMin: 120,
+  seoDescOptimalMax: 160,
+  seoMinWordCount: 300,
+  seoMinTags: 2,
 };
 
 // ─── Frontmatter Schemas ───
@@ -313,10 +348,13 @@ export function hexToRgba(hex: string, alpha: number): string {
 
 // ─── Sort & Filter Types ───
 
-export type SortMode = "seriesOrder" | "dateNewest" | "dateOldest" | "titleAZ" | "errorsFirst" | "draftsFirst";
+export type SortMode = "seriesOrder" | "dateNewest" | "dateOldest" | "titleAZ" | "errorsFirst" | "draftsFirst" | "seoScore";
 
 /** Time threshold for "recently modified" filter (24 hours in ms) */
 export const RECENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+/** v1.7.0: Default stale threshold in ms (30 days) */
+export const DEFAULT_STALE_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Deep-merge source into target (mutates target). Handles nested objects and arrays. */
 export function deepMerge<T extends Record<string, unknown>>(target: T, source: Record<string, unknown>): T {

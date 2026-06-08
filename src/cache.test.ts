@@ -11,7 +11,7 @@ import type { IsHistorySettings, ContentItem, ValidationResult } from "./types";
 // ─── Mock helpers ───
 
 const defaultSettings: IsHistorySettings = {
-  _version: 8,
+  _version: 9,
   archivePath: "src/content/blog",
   vaultPath: "src/content/vault",
   cardsPerPage: 40,
@@ -38,6 +38,15 @@ const defaultSettings: IsHistorySettings = {
   preflightDraft: false,
   preflightStatus: "published",
   preflightAutoDate: true,
+  staleThresholdDays: 30,
+  showStaleBadge: true,
+  showSeoScore: true,
+  seoTitleOptimalMin: 50,
+  seoTitleOptimalMax: 60,
+  seoDescOptimalMin: 120,
+  seoDescOptimalMax: 160,
+  seoMinWordCount: 300,
+  seoMinTags: 2,
 };
 
 function makeItem(overrides: Partial<ContentItem> & { path: string }): ContentItem {
@@ -63,6 +72,8 @@ function makeItem(overrides: Partial<ContentItem> & { path: string }): ContentIt
     publish: undefined,
     order: undefined,
     validation: { status: "ready", label: "Ready", errors: [] },
+    seoScore: null,
+    isStale: false,
     ...overrides,
   };
 }
